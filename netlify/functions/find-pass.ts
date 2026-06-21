@@ -1,0 +1,1 @@
+export { POST as default } from "../../src/app/api/find-pass/route";

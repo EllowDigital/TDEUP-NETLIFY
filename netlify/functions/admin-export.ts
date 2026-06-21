@@ -1,0 +1,1 @@
+export { GET as default } from "../../src/app/api/admin/export/route";

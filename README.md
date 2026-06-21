@@ -34,3 +34,13 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Deploy on Netlify
+
+This project is configured for Netlify with standard Functions.
+
+- Netlify reads the function sources from `netlify/functions`.
+- In Netlify builds, the client automatically switches API calls to `/.netlify/functions/...`.
+- When running locally with `next dev`, the app continues to use `/api/...` so the existing Next route handlers still work.
+
+Use `npm run build` to verify the Netlify-compatible build locally before deploying.

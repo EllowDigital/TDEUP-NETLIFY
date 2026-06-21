@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiUrl } from "@/lib/api-url";
 
 // The shape of the data we expect from the SuccessPass QR code
 interface ParsedQRData {
@@ -74,7 +75,7 @@ export default function CheckInPage() {
     setApiStatus(null);
 
     try {
-      const res = await fetch("/api/check-in", {
+      const res = await fetch(apiUrl("check-in"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ attendee_id: scannedUser.attendeeId }),
@@ -117,9 +118,9 @@ export default function CheckInPage() {
             <div className="flex border-b border-slate-100">
               <button
                 onClick={() => setActiveTab("SCAN")}
-                className={`flex-1 py-4 font-semibold text-sm flex items-center justify-center gap-2 transition-colors ${
+                className={`flex flex-1 items-center justify-center gap-2 py-4 text-sm font-semibold transition-colors ${
                   activeTab === "SCAN"
-                    ? "text-blue-600 bg-blue-50/50 border-b-2 border-blue-600"
+                    ? "border-b-2 border-blue-600 bg-blue-50/50 text-blue-600"
                     : "text-slate-500 hover:bg-slate-50"
                 }`}
               >
@@ -127,9 +128,9 @@ export default function CheckInPage() {
               </button>
               <button
                 onClick={() => setActiveTab("MANUAL")}
-                className={`flex-1 py-4 font-semibold text-sm flex items-center justify-center gap-2 transition-colors ${
+                className={`flex flex-1 items-center justify-center gap-2 py-4 text-sm font-semibold transition-colors ${
                   activeTab === "MANUAL"
-                    ? "text-blue-600 bg-blue-50/50 border-b-2 border-blue-600"
+                    ? "border-b-2 border-blue-600 bg-blue-50/50 text-blue-600"
                     : "text-slate-500 hover:bg-slate-50"
                 }`}
               >
@@ -233,10 +234,10 @@ export default function CheckInPage() {
                 // Show Result of Check-In API
                 <div className="space-y-6">
                   <div
-                    className={`flex flex-col items-center justify-center p-6 rounded-2xl border-2 text-center ${
+                    className={`flex flex-col items-center justify-center rounded-2xl border-2 p-6 text-center ${
                       apiStatus.type === "success"
-                        ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                        : "bg-red-50 border-red-200 text-red-700"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : "border-red-200 bg-red-50 text-red-700"
                     }`}
                   >
                     {apiStatus.type === "success" ? (

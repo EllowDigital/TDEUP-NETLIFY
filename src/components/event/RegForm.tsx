@@ -36,6 +36,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { State, City } from "country-state-city";
+import { apiUrl } from "@/lib/api-url";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -250,7 +251,7 @@ export function RegForm({ onSuccess }: RegFormProps) {
     setFindError("");
 
     try {
-      const res = await fetch("/api/find-pass", {
+      const res = await fetch(apiUrl("find-pass"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mobile: findMobile }),
@@ -364,7 +365,7 @@ export function RegForm({ onSuccess }: RegFormProps) {
 
       let response: Response;
       try {
-        response = await fetch("/api/register", {
+        response = await fetch(apiUrl("register"), {
           method: "POST",
           body: formData,
           signal: controller.signal,
@@ -1009,7 +1010,7 @@ export function RegForm({ onSuccess }: RegFormProps) {
                                 />
                                 <FormLabel
                                   htmlFor={dayInputId}
-                                  className={`flex flex-col items-center justify-center p-3 sm:p-5 border-2 rounded-xl cursor-pointer transition-all w-full select-none peer-focus-visible:ring-4 peer-focus-visible:ring-blue-500/40 peer-focus-visible:ring-offset-2 ${
+                                  className={`flex w-full select-none flex-col items-center justify-center rounded-xl border-2 p-3 transition-all peer-focus-visible:ring-4 peer-focus-visible:ring-blue-500/40 peer-focus-visible:ring-offset-2 sm:p-5 ${
                                     isChecked
                                       ? "border-[#0B1B2B] bg-[#0B1B2B] text-white shadow-md sm:scale-[1.02]"
                                       : "border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-white"
@@ -1020,7 +1021,7 @@ export function RegForm({ onSuccess }: RegFormProps) {
                                   </span>
 
                                   <span
-                                    className={`text-[10px] sm:text-xs mt-1 sm:mt-1.5 font-semibold tracking-wide uppercase ${
+                                    className={`mt-1 font-semibold uppercase tracking-wide text-[10px] sm:mt-1.5 sm:text-xs ${
                                       isChecked ? "text-slate-300" : "text-slate-500"
                                     }`}
                                   >

@@ -11,6 +11,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { apiUrl } from "@/lib/api-url";
 
 export default function AdminDashboard() {
   const [stats, setStats] = useState({ total: 0, pendingSync: 0 });
@@ -22,7 +23,7 @@ export default function AdminDashboard() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch("/api/admin/stats");
+        const res = await fetch(apiUrl("admin/stats"));
         const data = await res.json();
         if (res.ok) setStats(data);
       } catch (error) {
@@ -37,13 +38,13 @@ export default function AdminDashboard() {
     setIsSyncing(true);
     setMessage(null);
     try {
-      const res = await fetch("/api/admin/sync", { method: "POST" });
+      const res = await fetch(apiUrl("admin/sync"), { method: "POST" });
       const data = await res.json();
       if (res.ok) {
         setMessage({ text: data.message, type: "success" });
         // Refresh numbers
         try {
-          const res = await fetch("/api/admin/stats");
+          const res = await fetch(apiUrl("admin/stats"));
           const data = await res.json();
           if (res.ok) setStats(data);
         } catch (error) {
@@ -63,7 +64,7 @@ export default function AdminDashboard() {
     setIsExporting(format);
     setMessage(null);
     try {
-      const res = await fetch(`/api/admin/export?format=${format}`);
+      const res = await fetch(`${apiUrl("admin/export")}?format=${format}`);
       if (!res.ok) throw new Error("Export failed");
 
       // Handle file download
@@ -135,10 +136,10 @@ export default function AdminDashboard() {
         {/* Alert Messages */}
         {message && (
           <div
-            className={`p-4 rounded-xl flex items-center gap-3 border font-semibold text-sm ${
+            className={`flex items-center gap-3 rounded-xl border p-4 text-sm font-semibold ${
               message.type === "success"
-                ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                : "bg-red-50 border-red-200 text-red-700"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-red-200 bg-red-50 text-red-700"
             }`}
           >
             <AlertCircle className="w-5 h-5" /> {message.text}
