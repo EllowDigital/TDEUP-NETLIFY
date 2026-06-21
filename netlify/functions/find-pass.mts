@@ -1,1 +1,1 @@
-export { POST as default } from "../../src/app/api/find-pass/route";
+export { postFindPass as default } from "../../src/lib/api-handlers";

@@ -1,1 +1,1 @@
-export { POST as default } from "../../src/app/api/register/route";
+export { postRegister as default } from "../../src/lib/api-handlers";

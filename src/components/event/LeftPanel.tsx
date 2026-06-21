@@ -66,7 +66,8 @@ export function LeftPanel() {
               width={320}
               height={90}
               priority
-              className="mb-5 h-auto w-[220px] object-contain md:w-[280px] lg:w-[320px]"
+              className="mb-5 h-auto max-w-[220px] object-contain md:max-w-[280px] lg:max-w-[320px]"
+              style={{ width: "auto", height: "auto" }}
             />
           </div>
 

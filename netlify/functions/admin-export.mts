@@ -1,1 +1,1 @@
-export { GET as default } from "../../src/app/api/admin/export/route";
+export { getAdminExport as default } from "../../src/lib/api-handlers";

@@ -1,1 +1,1 @@
-export { POST as default } from "../../src/app/api/check-in/route";
+export { postCheckIn as default } from "../../src/lib/api-handlers";

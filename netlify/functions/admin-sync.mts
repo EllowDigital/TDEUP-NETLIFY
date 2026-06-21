@@ -1,1 +1,1 @@
-export { POST as default } from "../../src/app/api/admin/sync/route";
+export { postAdminSync as default } from "../../src/lib/api-handlers";
