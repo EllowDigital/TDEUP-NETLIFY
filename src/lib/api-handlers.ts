@@ -40,7 +40,11 @@ function generateCode(length = 6) {
   return code;
 }
 
-async function uploadToCloudinary(buffer: Buffer, mobile: string, retries = 2): Promise<string | null> {
+async function uploadToCloudinary(
+  buffer: Buffer,
+  mobile: string,
+  retries = 2
+): Promise<string | null> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await new Promise((resolve, reject) => {
@@ -139,7 +143,10 @@ export async function postCheckIn(req: Request) {
 
     if (updateError) throw updateError;
 
-    return jsonResponse({ success: true, message: `Successfully checked in ${user.full_name}!` }, 200);
+    return jsonResponse(
+      { success: true, message: `Successfully checked in ${user.full_name}!` },
+      200
+    );
   } catch (error) {
     console.error("Check-in Error:", error);
     return jsonResponse({ success: false, message: "Server error" }, 500);
@@ -372,7 +379,10 @@ export async function postAdminSync() {
     if (fetchError) throw fetchError;
 
     if (!unsynced || unsynced.length === 0) {
-      return jsonResponse({ success: true, message: "Google Sheets is already completely up to date!" }, 200);
+      return jsonResponse(
+        { success: true, message: "Google Sheets is already completely up to date!" },
+        200
+      );
     }
 
     const rowsToAppend = unsynced.map((row) => {
@@ -418,12 +428,18 @@ export async function postAdminSync() {
     if (updateError) throw updateError;
 
     return jsonResponse(
-      { success: true, message: `Successfully synced ${unsynced.length} records to Google Sheets!` },
+      {
+        success: true,
+        message: `Successfully synced ${unsynced.length} records to Google Sheets!`,
+      },
       200
     );
   } catch (error) {
     console.error("Sync Error:", error);
-    return jsonResponse({ success: false, message: "Failed to communicate with Google Sheets." }, 500);
+    return jsonResponse(
+      { success: false, message: "Failed to communicate with Google Sheets." },
+      500
+    );
   }
 }
 
