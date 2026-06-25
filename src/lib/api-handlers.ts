@@ -284,7 +284,7 @@ export async function postRegister(req: Request) {
         photo_url: photoUrl,
         checked_in: null,
         needs_cloud_sync: false, // Already in cloud
-        needs_sheet_sync: true,  // Needs to go to sheets
+        needs_sheet_sync: true, // Needs to go to sheets
       },
     ]);
 
@@ -333,7 +333,10 @@ export async function postRegister(req: Request) {
       });
 
       // UPDATE: Update needs_sheet_sync to false upon success
-      await supabase.from("attendees").update({ needs_sheet_sync: false }).eq("mobile", mobile.trim());
+      await supabase
+        .from("attendees")
+        .update({ needs_sheet_sync: false })
+        .eq("mobile", mobile.trim());
     } catch (sheetError) {
       console.error(
         `Google Sheets sync failed for ${mobile}, but data is safe in Supabase.`,
@@ -374,7 +377,7 @@ export async function getAdminStats() {
       .from("attendees")
       .select("*", { count: "exact", head: true })
       .eq("needs_sheet_sync", true);
-      
+
     // UPDATE: Also get total checked in count
     const { count: checkedInCount, error: checkedInError } = await supabase
       .from("attendees")
@@ -383,11 +386,14 @@ export async function getAdminStats() {
 
     if (totalError || pendingError || checkedInError) throw new Error("Failed to fetch counts");
 
-    return jsonResponse({ 
-      total: totalCount || 0, 
-      pendingSync: pendingCount || 0,
-      checkedIn: checkedInCount || 0
-    }, 200);
+    return jsonResponse(
+      {
+        total: totalCount || 0,
+        pendingSync: pendingCount || 0,
+        checkedIn: checkedInCount || 0,
+      },
+      200
+    );
   } catch (error) {
     console.error("Stats Error:", error);
     return jsonResponse({ success: false, message: "Server error" }, 500);
@@ -422,7 +428,7 @@ export async function postAdminSync() {
       spreadsheetId,
       range: "Sheet1!A:A", // Assuming Column A is attendee_id
     });
-    
+
     const existingIds = sheetData.data.values || [];
     const rowMap = new Map<string, number>();
     existingIds.forEach((row, index) => {
@@ -567,8 +573,8 @@ export async function getAdminExport(req: Request) {
       sqlString += `  attendance_days TEXT,\n`;
       sqlString += `  photo_url TEXT,\n`;
       sqlString += `  checked_in BOOLEAN,\n`;
-      sqlString += `  needs_cloud_sync BOOLEAN,\n`;  // Added for accuracy
-      sqlString += `  needs_sheet_sync BOOLEAN,\n`;  // Added for accuracy
+      sqlString += `  needs_cloud_sync BOOLEAN,\n`; // Added for accuracy
+      sqlString += `  needs_sheet_sync BOOLEAN,\n`; // Added for accuracy
       sqlString += `  created_at DATETIME\n`;
       sqlString += `);\n\n`;
 
