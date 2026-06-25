@@ -79,6 +79,9 @@ function jsonResponse(body: unknown, status = 200) {
   return Response.json(body, { status });
 }
 
+// ---------------------------------------------------------
+// 1. FIND PASS
+// ---------------------------------------------------------
 export async function postFindPass(req: Request) {
   try {
     const { mobile } = await req.json();
@@ -110,6 +113,9 @@ export async function postFindPass(req: Request) {
   }
 }
 
+// ---------------------------------------------------------
+// 2. CHECK IN
+// ---------------------------------------------------------
 export async function postCheckIn(req: Request) {
   try {
     const { attendee_id } = await req.json();
@@ -136,9 +142,10 @@ export async function postCheckIn(req: Request) {
       );
     }
 
+    // UPDATE: Set checked_in to true AND tell Google Sheets to update via needs_sheet_sync
     const { error: updateError } = await supabase
       .from("attendees")
-      .update({ checked_in: true })
+      .update({ checked_in: true, needs_sheet_sync: true })
       .eq("attendee_id", attendee_id);
 
     if (updateError) throw updateError;
@@ -153,6 +160,9 @@ export async function postCheckIn(req: Request) {
   }
 }
 
+// ---------------------------------------------------------
+// 3. REGISTER
+// ---------------------------------------------------------
 export async function postRegister(req: Request) {
   try {
     const supabase = getSupabase();
@@ -254,6 +264,7 @@ export async function postRegister(req: Request) {
       );
     }
 
+    // UPDATE: Insert with new sync flags
     const { error: insertError } = await supabase.from("attendees").insert([
       {
         attendee_id,
@@ -272,7 +283,8 @@ export async function postRegister(req: Request) {
         attendance_days: attendanceArray,
         photo_url: photoUrl,
         checked_in: null,
-        needs_sync: true,
+        needs_cloud_sync: false, // Already in cloud
+        needs_sheet_sync: true,  // Needs to go to sheets
       },
     ]);
 
@@ -320,7 +332,8 @@ export async function postRegister(req: Request) {
         requestBody: { values: [rowData] },
       });
 
-      await supabase.from("attendees").update({ needs_sync: false }).eq("mobile", mobile.trim());
+      // UPDATE: Update needs_sheet_sync to false upon success
+      await supabase.from("attendees").update({ needs_sheet_sync: false }).eq("mobile", mobile.trim());
     } catch (sheetError) {
       console.error(
         `Google Sheets sync failed for ${mobile}, but data is safe in Supabase.`,
@@ -345,6 +358,9 @@ export async function postRegister(req: Request) {
   }
 }
 
+// ---------------------------------------------------------
+// 4. ADMIN STATS
+// ---------------------------------------------------------
 export async function getAdminStats() {
   try {
     const supabase = getSupabase();
@@ -353,28 +369,44 @@ export async function getAdminStats() {
       .from("attendees")
       .select("*", { count: "exact", head: true });
 
+    // UPDATE: Count needs_sheet_sync instead of needs_sync
     const { count: pendingCount, error: pendingError } = await supabase
       .from("attendees")
       .select("*", { count: "exact", head: true })
-      .eq("needs_sync", true);
+      .eq("needs_sheet_sync", true);
+      
+    // UPDATE: Also get total checked in count
+    const { count: checkedInCount, error: checkedInError } = await supabase
+      .from("attendees")
+      .select("*", { count: "exact", head: true })
+      .eq("checked_in", true);
 
-    if (totalError || pendingError) throw new Error("Failed to fetch counts");
+    if (totalError || pendingError || checkedInError) throw new Error("Failed to fetch counts");
 
-    return jsonResponse({ total: totalCount || 0, pendingSync: pendingCount || 0 }, 200);
+    return jsonResponse({ 
+      total: totalCount || 0, 
+      pendingSync: pendingCount || 0,
+      checkedIn: checkedInCount || 0
+    }, 200);
   } catch (error) {
     console.error("Stats Error:", error);
     return jsonResponse({ success: false, message: "Server error" }, 500);
   }
 }
 
+// ---------------------------------------------------------
+// 5. ADMIN SYNC (UPSERT LOGIC)
+// ---------------------------------------------------------
 export async function postAdminSync() {
   try {
     const supabase = getSupabase();
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
+    // 1. Fetch all attendees that need syncing
     const { data: unsynced, error: fetchError } = await supabase
       .from("attendees")
       .select("*")
-      .eq("needs_sync", true);
+      .eq("needs_sheet_sync", true);
 
     if (fetchError) throw fetchError;
 
@@ -385,12 +417,28 @@ export async function postAdminSync() {
       );
     }
 
-    const rowsToAppend = unsynced.map((row) => {
+    // 2. Read the Google Sheet to find existing attendees
+    const sheetData = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "Sheet1!A:A", // Assuming Column A is attendee_id
+    });
+    
+    const existingIds = sheetData.data.values || [];
+    const rowMap = new Map<string, number>();
+    existingIds.forEach((row, index) => {
+      if (row[0]) rowMap.set(row[0], index + 1); // 1-indexed
+    });
+
+    const rowsToAppend: any[][] = [];
+    const rowsToUpdate: any[] = [];
+
+    // 3. Sort data into Appends (new) and Updates (existing check-ins)
+    unsynced.forEach((row) => {
       const days = Array.isArray(row.attendance_days)
         ? row.attendance_days.join(", ")
         : row.attendance_days;
 
-      return [
+      const rowData = [
         row.attendee_id,
         row.full_name,
         row.mobile,
@@ -409,20 +457,43 @@ export async function postAdminSync() {
         row.checked_in ? "TRUE" : "FALSE",
         row.created_at,
       ];
+
+      if (rowMap.has(row.attendee_id)) {
+        const rowNum = rowMap.get(row.attendee_id);
+        rowsToUpdate.push({
+          range: `Sheet1!A${rowNum}:Q${rowNum}`,
+          values: [rowData],
+        });
+      } else {
+        rowsToAppend.push(rowData);
+      }
     });
 
-    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-    await sheets.spreadsheets.values.append({
-      spreadsheetId,
-      range: "Sheet1!A:Q",
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: rowsToAppend },
-    });
+    // 4. Execute API Calls
+    if (rowsToUpdate.length > 0) {
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          valueInputOption: "USER_ENTERED",
+          data: rowsToUpdate,
+        },
+      });
+    }
 
+    if (rowsToAppend.length > 0) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId,
+        range: "Sheet1!A:Q",
+        valueInputOption: "USER_ENTERED",
+        requestBody: { values: rowsToAppend },
+      });
+    }
+
+    // 5. Update Supabase
     const syncedIds = unsynced.map((item) => item.id);
     const { error: updateError } = await supabase
       .from("attendees")
-      .update({ needs_sync: false })
+      .update({ needs_sheet_sync: false })
       .in("id", syncedIds);
 
     if (updateError) throw updateError;
@@ -430,7 +501,7 @@ export async function postAdminSync() {
     return jsonResponse(
       {
         success: true,
-        message: `Successfully synced ${unsynced.length} records to Google Sheets!`,
+        message: `Sync Complete! Updated ${rowsToUpdate.length} rows and Appended ${rowsToAppend.length} new rows.`,
       },
       200
     );
@@ -457,6 +528,9 @@ const escapeCSV = (val: unknown) => {
   return str;
 };
 
+// ---------------------------------------------------------
+// 6. ADMIN EXPORT
+// ---------------------------------------------------------
 export async function getAdminExport(req: Request) {
   try {
     const url = new URL(req.url);
@@ -493,6 +567,8 @@ export async function getAdminExport(req: Request) {
       sqlString += `  attendance_days TEXT,\n`;
       sqlString += `  photo_url TEXT,\n`;
       sqlString += `  checked_in BOOLEAN,\n`;
+      sqlString += `  needs_cloud_sync BOOLEAN,\n`;  // Added for accuracy
+      sqlString += `  needs_sheet_sync BOOLEAN,\n`;  // Added for accuracy
       sqlString += `  created_at DATETIME\n`;
       sqlString += `);\n\n`;
 
@@ -502,8 +578,8 @@ export async function getAdminExport(req: Request) {
           : row.attendance_days;
 
         sqlString +=
-          `INSERT INTO attendees (attendee_id, full_name, mobile, email, gender, attendee_type, business_name, business_category, other_category, address, city, state, pincode, attendance_days, photo_url, checked_in, created_at) VALUES (` +
-          `${escapeSQL(row.attendee_id)}, ${escapeSQL(row.full_name)}, ${escapeSQL(row.mobile)}, ${escapeSQL(row.email)}, ${escapeSQL(row.gender)}, ${escapeSQL(row.attendee_type)}, ${escapeSQL(row.business_name)}, ${escapeSQL(row.business_category)}, ${escapeSQL(row.other_category)}, ${escapeSQL(row.address)}, ${escapeSQL(row.city)}, ${escapeSQL(row.state)}, ${escapeSQL(row.pincode)}, ${escapeSQL(days)}, ${escapeSQL(row.photo_url)}, ${row.checked_in ? 1 : 0}, ${escapeSQL(row.created_at)});\n`;
+          `INSERT INTO attendees (attendee_id, full_name, mobile, email, gender, attendee_type, business_name, business_category, other_category, address, city, state, pincode, attendance_days, photo_url, checked_in, needs_cloud_sync, needs_sheet_sync, created_at) VALUES (` +
+          `${escapeSQL(row.attendee_id)}, ${escapeSQL(row.full_name)}, ${escapeSQL(row.mobile)}, ${escapeSQL(row.email)}, ${escapeSQL(row.gender)}, ${escapeSQL(row.attendee_type)}, ${escapeSQL(row.business_name)}, ${escapeSQL(row.business_category)}, ${escapeSQL(row.other_category)}, ${escapeSQL(row.address)}, ${escapeSQL(row.city)}, ${escapeSQL(row.state)}, ${escapeSQL(row.pincode)}, ${escapeSQL(days)}, ${escapeSQL(row.photo_url)}, ${row.checked_in ? 1 : 0}, ${row.needs_cloud_sync ? 1 : 0}, ${row.needs_sheet_sync ? 1 : 0}, ${escapeSQL(row.created_at)});\n`;
       });
 
       return new Response(sqlString, {
