@@ -102,7 +102,10 @@ export async function postFindPass(req: Request) {
     if (error) throw error;
 
     if (!data) {
-      return jsonResponse({ success: false, message: "No pass found for this mobile number." }, 404);
+      return jsonResponse(
+        { success: false, message: "No pass found for this mobile number." },
+        404
+      );
     }
 
     return jsonResponse({ success: true, attendee: data }, 200);
@@ -117,7 +120,11 @@ export async function postFindPass(req: Request) {
 // ---------------------------------------------------------
 export async function postCheckIn(req: Request) {
   try {
-    const { attendee_id, device_name = "Online Scanner", station_name = "Web Hub" } = await req.json();
+    const {
+      attendee_id,
+      device_name = "Online Scanner",
+      station_name = "Web Hub",
+    } = await req.json();
 
     if (!attendee_id) {
       return jsonResponse({ success: false, message: "Attendee ID required." }, 400);
@@ -138,7 +145,20 @@ export async function postCheckIn(req: Request) {
 
     // 2. Determine "Today's Date" in IST
     const dateIST = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const monthNames = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
     let todayKey = `${dateIST.getDate()} ${monthNames[dateIST.getMonth()]}`;
 
     // --- TESTING OVERRIDE: Uncomment the next line to test as if today is the event day ---
@@ -146,11 +166,14 @@ export async function postCheckIn(req: Request) {
 
     // 3. Validate Date (Does the user have a pass for today?)
     const attendanceDays: string[] = user.attendance_days || [];
-    const cleanDays = attendanceDays.map(d => d.replace(" 2026", "").trim());
+    const cleanDays = attendanceDays.map((d) => d.replace(" 2026", "").trim());
 
     if (!attendanceDays.includes(todayKey) && !cleanDays.includes(todayKey)) {
       return jsonResponse(
-        { success: false, message: `Access Denied: ${user.full_name} does not have a pass for today (${todayKey}).` },
+        {
+          success: false,
+          message: `Access Denied: ${user.full_name} does not have a pass for today (${todayKey}).`,
+        },
         403
       );
     }
@@ -169,15 +192,15 @@ export async function postCheckIn(req: Request) {
     history[todayKey] = {
       timestamp: timestampNow,
       device: device_name,
-      station: station_name
+      station: station_name,
     };
 
     // 6. Save to Database
     const { error: updateError } = await supabase
       .from("attendees")
-      .update({ 
-        checkin_history: history, 
-        needs_sheet_sync: true // Mark for Google Sheets sync
+      .update({
+        checkin_history: history,
+        needs_sheet_sync: true, // Mark for Google Sheets sync
       })
       .eq("attendee_id", attendee_id);
 
@@ -247,7 +270,8 @@ export async function postRegister(req: Request) {
       return jsonResponse(
         {
           success: false,
-          message: validationResult.error.issues[0]?.message || "Please complete all required fields.",
+          message:
+            validationResult.error.issues[0]?.message || "Please complete all required fields.",
         },
         400
       );
@@ -301,9 +325,9 @@ export async function postRegister(req: Request) {
         pincode,
         attendance_days: attendanceArray,
         photo_url: photoUrl,
-        checkin_history: {},     // Start empty
+        checkin_history: {}, // Start empty
         needs_cloud_sync: false, // Already online
-        needs_sheet_sync: true,  // Send to Sheets
+        needs_sheet_sync: true, // Send to Sheets
       },
     ]);
 
@@ -343,15 +367,24 @@ export async function postRegister(req: Request) {
         requestBody: { values: [rowData] },
       });
 
-      await supabase.from("attendees").update({ needs_sheet_sync: false }).eq("mobile", mobile.trim());
+      await supabase
+        .from("attendees")
+        .update({ needs_sheet_sync: false })
+        .eq("mobile", mobile.trim());
     } catch (sheetError) {
       console.error(`Google Sheets sync failed for ${mobile}`, sheetError);
     }
 
-    return jsonResponse({ success: true, attendeeId: attendee_id, message: "Registration successful!" }, 201);
+    return jsonResponse(
+      { success: true, attendeeId: attendee_id, message: "Registration successful!" },
+      201
+    );
   } catch (error: any) {
     console.error("Submission Error:", error);
-    return jsonResponse({ success: false, message: error.message || "An unexpected error occurred." }, 500);
+    return jsonResponse(
+      { success: false, message: error.message || "An unexpected error occurred." },
+      500
+    );
   }
 }
 
@@ -370,7 +403,7 @@ export async function getAdminStats() {
       .from("attendees")
       .select("*", { count: "exact", head: true })
       .eq("needs_sheet_sync", true);
-      
+
     // Count anyone whose checkin_history is NOT an empty JSON object
     const { count: checkedInCount, error: checkedInError } = await supabase
       .from("attendees")
@@ -379,12 +412,15 @@ export async function getAdminStats() {
 
     if (totalError || pendingError || checkedInError) throw new Error("Failed to fetch counts");
 
-    return jsonResponse({ 
-      success: true,
-      total: totalCount || 0, 
-      pendingSync: pendingCount || 0,
-      checkedIn: checkedInCount || 0
-    }, 200);
+    return jsonResponse(
+      {
+        success: true,
+        total: totalCount || 0,
+        pendingSync: pendingCount || 0,
+        checkedIn: checkedInCount || 0,
+      },
+      200
+    );
   } catch (error) {
     console.error("Stats Error:", error);
     return jsonResponse({ success: false, message: "Server error" }, 500);
@@ -412,9 +448,9 @@ export async function postAdminSync() {
 
     const sheetData = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "Sheet1!A:A", 
+      range: "Sheet1!A:A",
     });
-    
+
     const existingIds = sheetData.data.values || [];
     const rowMap = new Map<string, number>();
     existingIds.forEach((row, index) => {
@@ -425,7 +461,9 @@ export async function postAdminSync() {
     const rowsToUpdate: any[] = [];
 
     unsynced.forEach((row) => {
-      const days = Array.isArray(row.attendance_days) ? row.attendance_days.join(", ") : row.attendance_days;
+      const days = Array.isArray(row.attendance_days)
+        ? row.attendance_days.join(", ")
+        : row.attendance_days;
 
       // Extract days attended from JSON keys
       const historyKeys = Object.keys(row.checkin_history || {});
@@ -447,7 +485,7 @@ export async function postAdminSync() {
         row.pincode,
         days,
         row.photo_url || "N/A",
-        finalCheckinStatus, 
+        finalCheckinStatus,
         row.created_at,
       ];
 
@@ -483,10 +521,19 @@ export async function postAdminSync() {
 
     if (updateError) throw updateError;
 
-    return jsonResponse({ success: true, message: `Updated ${rowsToUpdate.length} rows, Appended ${rowsToAppend.length} rows.` }, 200);
+    return jsonResponse(
+      {
+        success: true,
+        message: `Updated ${rowsToUpdate.length} rows, Appended ${rowsToAppend.length} rows.`,
+      },
+      200
+    );
   } catch (error) {
     console.error("Sync Error:", error);
-    return jsonResponse({ success: false, message: "Failed to communicate with Google Sheets." }, 500);
+    return jsonResponse(
+      { success: false, message: "Failed to communicate with Google Sheets." },
+      500
+    );
   }
 }
 
@@ -549,7 +596,9 @@ export async function getAdminExport(req: Request) {
       sqlString += `);\n\n`;
 
       attendees.forEach((row) => {
-        const days = Array.isArray(row.attendance_days) ? row.attendance_days.join(", ") : row.attendance_days;
+        const days = Array.isArray(row.attendance_days)
+          ? row.attendance_days.join(", ")
+          : row.attendance_days;
         const historyStr = JSON.stringify(row.checkin_history || {});
 
         sqlString += `INSERT INTO attendees (id, attendee_id, full_name, mobile, email, gender, attendee_type, business_name, business_category, other_category, address, city, state, pincode, attendance_days, photo_url, checkin_history, needs_cloud_sync, needs_sheet_sync, created_at) VALUES (`;
