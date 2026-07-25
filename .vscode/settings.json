@@ -8,6 +8,6 @@
     "editor.defaultFormatter": "vscode.css-language-features"
   },
   "[typescript]": {
-    "editor.defaultFormatter": "TypeScriptTeam.native-preview"
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
   }
 }

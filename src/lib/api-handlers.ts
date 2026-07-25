@@ -1,3 +1,4 @@
+// api-handlers.ts
 import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import { v2 as cloudinary } from "cloudinary";
@@ -25,15 +26,6 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const auth = new google.auth.GoogleAuth({
-  credentials: {
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-  },
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-});
-
-const sheets = google.sheets({ version: "v4", auth });
 const CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 // ---------------------------------------------------------
@@ -47,6 +39,7 @@ function generateCode(length = 6) {
   return code;
 }
 
+// 🛡️ ROBUST FEATURE: Cloudinary upload with strict timeouts & retries
 async function uploadToCloudinary(
   buffer: Buffer,
   mobile: string,
@@ -60,7 +53,7 @@ async function uploadToCloudinary(
             folder: "TDEUP_Visitors",
             public_id: mobile,
             overwrite: true,
-            timeout: 20000,
+            timeout: 10000, // Strict 10-second timeout to prevent server crash
           },
           (error, result) => {
             if (result) resolve(result.secure_url);
@@ -71,7 +64,7 @@ async function uploadToCloudinary(
       });
     } catch (error) {
       if (attempt === retries) return null;
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
   return null;
@@ -116,15 +109,23 @@ export async function postFindPass(req: Request) {
 }
 
 // ---------------------------------------------------------
-// 2. CHECK IN (Multi-Day Logic)
+// 2. CHECK IN (Multi-Day Logic & Test Mode)
 // ---------------------------------------------------------
 export async function postCheckIn(req: Request) {
   try {
-    const {
-      attendee_id,
-      device_name = "Online Scanner",
-      station_name = "Web Hub",
-    } = await req.json();
+    // ==========================================
+    // ⚙️ EVENT CONFIGURATION & TEST MODE
+    // ==========================================
+    const IS_TEST_MODE = false; // ⚠️ CHANGE TO 'false' FOR THE LIVE EVENT
+
+    // If testing, set the fake date here
+    const testDate = new Date(2026, 7, 30, 10, 0, 0);
+    // ==========================================
+
+    const { attendee_id } = await req.json();
+
+    // Grab the browser info to act as the "device" name for online check-ins
+    const userAgent = req.headers.get("user-agent") || "Online Web Portal";
 
     if (!attendee_id) {
       return jsonResponse({ success: false, message: "Attendee ID required." }, 400);
@@ -143,8 +144,19 @@ export async function postCheckIn(req: Request) {
       return jsonResponse({ success: false, message: "Invalid Pass. Attendee not found." }, 404);
     }
 
-    // 2. Determine "Today's Date" in IST
-    const dateIST = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+    // 2. Determine "Today's Date" (Using Test Date OR Real IST Date)
+    const dateIST = IS_TEST_MODE
+      ? testDate
+      : new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+
+    const day = dateIST.getDate();
+    const year = dateIST.getFullYear();
+    const monthNum = String(dateIST.getMonth() + 1).padStart(2, "0");
+    const dayNum = String(day).padStart(2, "0");
+
+    // Create the machine-readable date_code (e.g., "2026-08-30")
+    const dateCode = `${year}-${monthNum}-${dayNum}`;
+
     const monthNames = [
       "January",
       "February",
@@ -159,16 +171,14 @@ export async function postCheckIn(req: Request) {
       "November",
       "December",
     ];
-    let todayKey = `${dateIST.getDate()} ${monthNames[dateIST.getMonth()]}`;
+    const month = monthNames[dateIST.getMonth()];
 
-    // --- TESTING OVERRIDE: Uncomment the next line to test as if today is the event day ---
-    // todayKey = "30 August";
+    // Create the human-readable display_date (e.g., "30 August")
+    const todayKey = `${day} ${month}`;
 
-    // 3. Validate Date (Does the user have a pass for today?)
-    const attendanceDays: string[] = user.attendance_days || [];
-    const cleanDays = attendanceDays.map((d) => d.replace(" 2026", "").trim());
-
-    if (!attendanceDays.includes(todayKey) && !cleanDays.includes(todayKey)) {
+    // 3. VALIDATION: Did they register for today?
+    const attendanceDays = user.attendance_days || [];
+    if (!attendanceDays.includes(todayKey)) {
       return jsonResponse(
         {
           success: false,
@@ -178,41 +188,50 @@ export async function postCheckIn(req: Request) {
       );
     }
 
-    // 4. Validate Duplicate Check-in (Are they already checked in today?)
+    // 4. VALIDATION: Are they already checked in TODAY?
     const history = user.checkin_history || {};
-    if (history[todayKey] || history[`${todayKey} 2026`]) {
+    if (history[todayKey]) {
       return jsonResponse(
         { success: false, message: `${user.full_name} is already checked in for today.` },
         409
       );
     }
 
-    // 5. Update Check-in History (Nested JSON)
-    const timestampNow = new Date().toISOString();
+    // 5. SUCCESS: Add today's check-in using the UNIFIED JSON FORMAT
     history[todayKey] = {
-      timestamp: timestampNow,
-      device: device_name,
-      station: station_name,
+      timestamp: new Date().toISOString(),
+      source: "online_portal",
+      device: userAgent.substring(0, 80), // Truncate to keep database clean
+      date_code: dateCode,
+      display_date: todayKey,
     };
 
-    // 6. Save to Database
+    // 6. Update database with new history AND correct Sync Flags
     const { error: updateError } = await supabase
       .from("attendees")
       .update({
         checkin_history: history,
-        needs_sheet_sync: true, // Mark for Google Sheets sync
+        needs_sheet_sync: true, // Tells system to update Google Sheets
+        needs_local_sync: true, // Tells Laptop-A to download this check-in
       })
       .eq("attendee_id", attendee_id);
 
-    if (updateError) throw updateError;
+    if (updateError) {
+      console.error("Database Update Error:", updateError);
+      throw new Error("Failed to save check-in to database.");
+    }
 
+    // 7. Return Success
+    let successMessage = `Day ${day} Access Granted! Welcome ${user.full_name}!`;
+    if (IS_TEST_MODE) successMessage += ` [TEST MODE: ${todayKey}]`;
+
+    return jsonResponse({ success: true, message: successMessage }, 200);
+  } catch (error: any) {
+    console.error("Check-in Route Error:", error);
     return jsonResponse(
-      { success: true, message: `Access Granted for ${todayKey}! Welcome ${user.full_name}!` },
-      200
+      { success: false, message: "A server error occurred during check-in." },
+      500
     );
-  } catch (error) {
-    console.error("Check-in Error:", error);
-    return jsonResponse({ success: false, message: "Server error" }, 500);
   }
 }
 
@@ -222,9 +241,17 @@ export async function postCheckIn(req: Request) {
 export async function postRegister(req: Request) {
   try {
     const supabase = getSupabase();
-    const formData = await req.formData();
-    const mobile = formData.get("mobile") as string;
+    let formData: FormData;
 
+    // 🛡️ ROBUST FEATURE: Gracefully catch multipart boundary errors
+    try {
+      formData = await req.formData();
+    } catch (err) {
+      console.error("FormData Parse Error:", err);
+      return jsonResponse({ success: false, message: "Invalid form data submission format." }, 400);
+    }
+
+    const mobile = formData.get("mobile") as string;
     if (!mobile || mobile.trim() === "") {
       return jsonResponse({ success: false, message: "Mobile number is required." }, 400);
     }
@@ -243,13 +270,13 @@ export async function postRegister(req: Request) {
 
     const rawAttendance = formData.get("attendance") as string;
     let attendanceArray: string[] = [];
-
     try {
       attendanceArray = JSON.parse(rawAttendance);
     } catch {
       attendanceArray = rawAttendance ? [rawAttendance] : [];
     }
 
+    // 1. DATA VALIDATION
     const validationResult = formSchema.safeParse({
       fullName,
       mobile: mobile.trim(),
@@ -270,8 +297,7 @@ export async function postRegister(req: Request) {
       return jsonResponse(
         {
           success: false,
-          message:
-            validationResult.error.issues[0]?.message || "Please complete all required fields.",
+          message: validationResult.error.issues[0]?.message || "Please complete all fields.",
         },
         400
       );
@@ -282,12 +308,13 @@ export async function postRegister(req: Request) {
       return jsonResponse({ success: false, message: "Profile photo is required." }, 400);
     }
 
+    // 2. PREPARE SECURE DATA
     const typeInitial = attendeeType.charAt(0).toUpperCase();
     const attendee_id = `TDE26-${typeInitial}-${generateCode(6)}`;
     const normalizedBusinessName = businessName.trim() || null;
     const normalizedBusinessCategory = businessCategory.trim() || null;
-
     let normalizedOtherCategory: string | null = otherCategory.trim() || null;
+
     if (normalizedBusinessCategory !== "OTHER" || !normalizedOtherCategory) {
       normalizedOtherCategory = null;
     }
@@ -297,20 +324,23 @@ export async function postRegister(req: Request) {
       "31 August": 2,
       "1 September": 3,
     };
-
     attendanceArray.sort((a, b) => (chronologicalOrder[a] || 99) - (chronologicalOrder[b] || 99));
 
+    // 3. UPLOAD PHOTO
     const buffer = Buffer.from(await photoFile.arrayBuffer());
     const photoUrl = await uploadToCloudinary(buffer, mobile.trim());
 
     if (!photoUrl) {
-      return jsonResponse({ success: false, message: "Photo upload failed. Try again." }, 502);
+      return jsonResponse(
+        { success: false, message: "Network too slow. Photo upload timed out. Please try again." },
+        502
+      );
     }
 
-    // Insert with NEW Schema
+    // 4. FAST SUPABASE INSERT
     const { error: insertError } = await supabase.from("attendees").insert([
       {
-        attendee_id,
+        attendee_id: attendee_id,
         full_name: fullName,
         mobile: mobile.trim(),
         email: email?.trim() || null,
@@ -325,64 +355,85 @@ export async function postRegister(req: Request) {
         pincode,
         attendance_days: attendanceArray,
         photo_url: photoUrl,
-        checkin_history: {}, // Start empty
-        needs_cloud_sync: false, // Already online
-        needs_sheet_sync: true, // Send to Sheets
+        checkin_history: {},
+        needs_local_sync: true, // Tell local clients to download
+        needs_cloud_sync: false,
+        needs_sheet_sync: true, // Tell system to send to Sheets
       },
     ]);
 
     if (insertError) {
       if (insertError.code === "23505") {
-        return jsonResponse({ success: false, message: "Mobile number already registered." }, 409);
+        return jsonResponse({ success: false, message: "You are already registered." }, 409);
       }
-      return jsonResponse({ success: false, message: "Database save failed." }, 500);
+      throw new Error("Database error");
     }
 
+    // 5. 🛡️ ROBUST GOOGLE SHEETS ATTEMPT (Non-blocking failure)
     try {
       const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-      const rowData = [
-        attendee_id,
-        fullName,
-        mobile.trim(),
-        email || "N/A",
-        gender,
-        attendeeType,
-        normalizedBusinessName || "N/A",
-        normalizedBusinessCategory || "N/A",
-        normalizedOtherCategory || "N/A",
-        address,
-        city,
-        state,
-        pincode,
-        attendanceArray.join(", "),
-        photoUrl || "N/A",
-        "Not Checked In", // New string format for sheets
-        new Date().toISOString(),
-      ];
+      if (spreadsheetId && process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY) {
+        const auth = new google.auth.GoogleAuth({
+          credentials: {
+            client_email: process.env.GOOGLE_CLIENT_EMAIL,
+            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+          },
+          scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+        });
 
-      await sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: "Sheet1!A:Q",
-        valueInputOption: "USER_ENTERED",
-        requestBody: { values: [rowData] },
-      });
+        const sheets = google.sheets({ version: "v4", auth });
 
-      await supabase
-        .from("attendees")
-        .update({ needs_sheet_sync: false })
-        .eq("mobile", mobile.trim());
+        const rowData = [
+          attendee_id,
+          fullName,
+          mobile.trim(),
+          email?.trim() || "N/A",
+          gender,
+          attendeeType,
+          normalizedBusinessName || "N/A",
+          normalizedBusinessCategory || "N/A",
+          normalizedOtherCategory || "N/A",
+          address,
+          city,
+          state,
+          pincode,
+          attendanceArray.join(", "),
+          photoUrl,
+          "Not Checked In",
+          new Date().toISOString(),
+        ];
+
+        // Append to sheets
+        await sheets.spreadsheets.values.append({
+          spreadsheetId,
+          range: "Sheet1!A:Q",
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: [rowData] },
+        });
+
+        // If successful, update the flag in Supabase so Admin Sync doesn't duplicate it
+        await supabase
+          .from("attendees")
+          .update({ needs_sheet_sync: false })
+          .eq("attendee_id", attendee_id);
+      }
     } catch (sheetError) {
-      console.error(`Google Sheets sync failed for ${mobile}`, sheetError);
+      console.warn("Direct Google Sheet sync failed. Deferred to Admin Sync.", sheetError);
     }
 
+    // 6. INSTANT SUCCESS RETURN
     return jsonResponse(
-      { success: true, attendeeId: attendee_id, message: "Registration successful!" },
+      {
+        success: true,
+        attendeeId: attendee_id,
+        message: "Registration successful! Pass generated.",
+      },
       201
     );
   } catch (error: any) {
-    console.error("Submission Error:", error);
+    console.error("Critical System Error:", error);
     return jsonResponse(
-      { success: false, message: error.message || "An unexpected error occurred." },
+      { success: false, message: "An unexpected error occurred. Please try again." },
       500
     );
   }
@@ -404,7 +455,6 @@ export async function getAdminStats() {
       .select("*", { count: "exact", head: true })
       .eq("needs_sheet_sync", true);
 
-    // Count anyone whose checkin_history is NOT an empty JSON object
     const { count: checkedInCount, error: checkedInError } = await supabase
       .from("attendees")
       .select("*", { count: "exact", head: true })
@@ -435,110 +485,169 @@ export async function postAdminSync() {
     const supabase = getSupabase();
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
-    const { data: unsynced, error: fetchError } = await supabase
+    if (!spreadsheetId) {
+      return jsonResponse({ success: false, message: "Google Sheet ID is missing." }, 500);
+    }
+
+    // 1. Fetch exactly 100 records needing sync to prevent server timeout
+    const { data: attendeesToSync, error: fetchError } = await supabase
       .from("attendees")
       .select("*")
-      .eq("needs_sheet_sync", true);
+      .eq("needs_sheet_sync", true)
+      .limit(100);
 
-    if (fetchError) throw fetchError;
-
-    if (!unsynced || unsynced.length === 0) {
-      return jsonResponse({ success: true, message: "Google Sheets is already up to date!" }, 200);
+    if (fetchError) {
+      console.error("Supabase Fetch Error:", fetchError);
+      return jsonResponse(
+        { success: false, message: "Failed to fetch records from database." },
+        500
+      );
     }
 
-    const sheetData = await sheets.spreadsheets.values.get({
+    if (!attendeesToSync || attendeesToSync.length === 0) {
+      return jsonResponse(
+        { success: true, message: "Everything is up to date. No records to sync." },
+        200
+      );
+    }
+
+    // 2. Initialize Google Sheets API
+    const auth = new google.auth.GoogleAuth({
+      credentials: {
+        client_email: process.env.GOOGLE_CLIENT_EMAIL,
+        private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+      },
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+    const sheets = google.sheets({ version: "v4", auth });
+
+    // 3. GET PRE-LOCATION OF USERS (Read Column A to find existing rows)
+    const existingIdsResponse = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "Sheet1!A:A",
+      range: "Sheet1!A:A", // Fetch only Attendee IDs
     });
 
-    const existingIds = sheetData.data.values || [];
-    const rowMap = new Map<string, number>();
-    existingIds.forEach((row, index) => {
-      if (row[0]) rowMap.set(row[0], index + 1);
+    const existingRows = existingIdsResponse.data.values || [];
+    const rowIndexMap = new Map<string, number>();
+    existingRows.forEach((row, index) => {
+      if (row[0]) rowIndexMap.set(row[0].trim(), index + 1);
     });
 
-    const rowsToAppend: any[][] = [];
-    const rowsToUpdate: any[] = [];
+    // 4. SORT DATA INTO 'UPDATES' AND 'APPENDS'
+    const updateData: any[] = [];
+    const appendData: any[] = [];
+    const successfullyProcessedIds: string[] = [];
 
-    unsynced.forEach((row) => {
-      const days = Array.isArray(row.attendance_days)
-        ? row.attendance_days.join(", ")
-        : row.attendance_days;
+    attendeesToSync.forEach((attendee) => {
+      // Format check-in history beautifully
+      let checkinStatus = "Not Checked In";
+      if (attendee.checkin_history && Object.keys(attendee.checkin_history).length > 0) {
+        checkinStatus = Object.entries(attendee.checkin_history)
+          .map(([date, details]: [string, any]) => `${date} (${details.source || "unknown"})`)
+          .join(" | ");
+      }
 
-      // Extract days attended from JSON keys
-      const historyKeys = Object.keys(row.checkin_history || {});
-      const finalCheckinStatus = historyKeys.length > 0 ? historyKeys.join(", ") : "Not Checked In";
-
-      const rowData = [
-        row.attendee_id,
-        row.full_name,
-        row.mobile,
-        row.email || "N/A",
-        row.gender,
-        row.attendee_type,
-        row.business_name || "N/A",
-        row.business_category || "N/A",
-        row.other_category || "N/A",
-        row.address,
-        row.city,
-        row.state,
-        row.pincode,
-        days,
-        row.photo_url || "N/A",
-        finalCheckinStatus,
-        row.created_at,
+      // Exact row format matching Google Sheet Columns A to Q
+      const formattedRow = [
+        attendee.attendee_id,
+        attendee.full_name,
+        attendee.mobile,
+        attendee.email || "N/A",
+        attendee.gender,
+        attendee.attendee_type,
+        attendee.business_name || "N/A",
+        attendee.business_category || "N/A",
+        attendee.other_category || "N/A",
+        attendee.address,
+        attendee.city,
+        attendee.state,
+        attendee.pincode,
+        (attendee.attendance_days || []).join(", "),
+        attendee.photo_url || "N/A",
+        checkinStatus,
+        new Date(attendee.updated_at || attendee.created_at).toISOString(),
       ];
 
-      if (rowMap.has(row.attendee_id)) {
-        const rowNum = rowMap.get(row.attendee_id);
-        rowsToUpdate.push({ range: `Sheet1!A${rowNum}:Q${rowNum}`, values: [rowData] });
+      const existingRowNumber = rowIndexMap.get(attendee.attendee_id);
+
+      if (existingRowNumber) {
+        updateData.push({
+          range: `Sheet1!A${existingRowNumber}:Q${existingRowNumber}`,
+          values: [formattedRow],
+        });
       } else {
-        rowsToAppend.push(rowData);
+        appendData.push(formattedRow);
       }
+
+      successfullyProcessedIds.push(attendee.id);
     });
 
-    if (rowsToUpdate.length > 0) {
-      await sheets.spreadsheets.values.batchUpdate({
-        spreadsheetId,
-        requestBody: { valueInputOption: "USER_ENTERED", data: rowsToUpdate },
-      });
+    // 5. EXECUTE GOOGLE SHEETS API CALLS
+    try {
+      if (updateData.length > 0) {
+        await sheets.spreadsheets.values.batchUpdate({
+          spreadsheetId,
+          requestBody: {
+            valueInputOption: "USER_ENTERED",
+            data: updateData,
+          },
+        });
+      }
+
+      if (appendData.length > 0) {
+        await sheets.spreadsheets.values.append({
+          spreadsheetId,
+          range: "Sheet1!A:Q",
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: appendData },
+        });
+      }
+    } catch (sheetError) {
+      console.error("Google Sheets API Error:", sheetError);
+      return jsonResponse(
+        { success: false, message: "Connected to database, but failed to write to Google Sheets." },
+        502
+      );
     }
 
-    if (rowsToAppend.length > 0) {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId,
-        range: "Sheet1!A:Q",
-        valueInputOption: "USER_ENTERED",
-        requestBody: { values: rowsToAppend },
-      });
+    // 6. CLEAR FLAGS IN SUPABASE
+    if (successfullyProcessedIds.length > 0) {
+      const { error: updateError } = await supabase
+        .from("attendees")
+        .update({ needs_sheet_sync: false })
+        .in("id", successfullyProcessedIds);
+
+      if (updateError) {
+        console.error("Supabase Flag Update Error:", updateError);
+        return jsonResponse(
+          {
+            success: false,
+            message: "Synced to sheets, but failed to clear sync flags. (Might cause repeat syncs)",
+          },
+          500
+        );
+      }
     }
 
-    const syncedIds = unsynced.map((item) => item.id);
-    const { error: updateError } = await supabase
-      .from("attendees")
-      .update({ needs_sheet_sync: false })
-      .in("id", syncedIds);
-
-    if (updateError) throw updateError;
-
+    // 7. RETURN ROBUST SUCCESS
     return jsonResponse(
       {
         success: true,
-        message: `Updated ${rowsToUpdate.length} rows, Appended ${rowsToAppend.length} rows.`,
+        message: `Successfully synced ${successfullyProcessedIds.length} records (${updateData.length} updated, ${appendData.length} new).`,
       },
       200
     );
-  } catch (error) {
-    console.error("Sync Error:", error);
+  } catch (error: any) {
+    console.error("Critical Sync API Error:", error);
     return jsonResponse(
-      { success: false, message: "Failed to communicate with Google Sheets." },
+      { success: false, message: "An unexpected system error occurred during sync." },
       500
     );
   }
 }
 
 // ---------------------------------------------------------
-// 6. ADMIN EXPORT
+// 6. ADMIN EXPORT (Left unchanged as it worked perfectly)
 // ---------------------------------------------------------
 const escapeSQL = (val: string | null | undefined) => {
   if (!val) return "NULL";
@@ -613,7 +722,6 @@ export async function getAdminExport(req: Request) {
       });
     }
 
-    // CSV Format
     const headers = Object.keys(attendees[0]);
     let csvString = headers.join(",") + "\n";
 
