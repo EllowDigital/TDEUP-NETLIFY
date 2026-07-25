@@ -123,7 +123,10 @@ export async function postCheckIn(req: NextRequest) {
     const IS_TEST_MODE = false; // ⚠️ CHANGE TO 'false' FOR THE LIVE EVENT
 
     // If testing, set the fake date here
-    const testDate = new Date(2026, 7, 30, 10, 0, 0);
+    // const testDate = new Date(2026, 7, 30, 10, 0, 0);
+    const testDate = new Date(2026, 7, 31, 10, 0, 0);
+    // const testDate = new Date(2026, 8, 1, 10, 0, 0);
+
     // ==========================================
 
     const { attendee_id } = await req.json();
