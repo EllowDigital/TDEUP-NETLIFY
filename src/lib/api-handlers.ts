@@ -1,4 +1,5 @@
-// api-handlers.ts
+// src/lib/api-handlers.ts
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { google } from "googleapis";
 import { v2 as cloudinary } from "cloudinary";
@@ -70,14 +71,16 @@ async function uploadToCloudinary(
   return null;
 }
 
+// 🛡️ CRITICAL FIX: Use NextResponse to prevent Netlify timeouts
 function jsonResponse(body: unknown, status = 200) {
-  return Response.json(body, { status });
+  return NextResponse.json(body, { status });
 }
 
 // ---------------------------------------------------------
 // 1. FIND PASS
 // ---------------------------------------------------------
-export async function postFindPass(req: Request) {
+// 🛡️ CRITICAL FIX: Use NextRequest
+export async function postFindPass(req: NextRequest) {
   try {
     const { mobile } = await req.json();
 
@@ -111,7 +114,8 @@ export async function postFindPass(req: Request) {
 // ---------------------------------------------------------
 // 2. CHECK IN (Multi-Day Logic & Test Mode)
 // ---------------------------------------------------------
-export async function postCheckIn(req: Request) {
+// 🛡️ CRITICAL FIX: Use NextRequest
+export async function postCheckIn(req: NextRequest) {
   try {
     // ==========================================
     // ⚙️ EVENT CONFIGURATION & TEST MODE
@@ -238,7 +242,8 @@ export async function postCheckIn(req: Request) {
 // ---------------------------------------------------------
 // 3. REGISTER
 // ---------------------------------------------------------
-export async function postRegister(req: Request) {
+// 🛡️ CRITICAL FIX: Use NextRequest to prevent FormData Boundary loss
+export async function postRegister(req: NextRequest) {
   try {
     const supabase = getSupabase();
     let formData: FormData;
@@ -647,7 +652,7 @@ export async function postAdminSync() {
 }
 
 // ---------------------------------------------------------
-// 6. ADMIN EXPORT (Left unchanged as it worked perfectly)
+// 6. ADMIN EXPORT
 // ---------------------------------------------------------
 const escapeSQL = (val: string | null | undefined) => {
   if (!val) return "NULL";
@@ -663,7 +668,8 @@ const escapeCSV = (val: unknown) => {
   return str;
 };
 
-export async function getAdminExport(req: Request) {
+// 🛡️ CRITICAL FIX: Use NextRequest and NextResponse for file exports
+export async function getAdminExport(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const format = url.searchParams.get("format") || "csv";
@@ -676,7 +682,7 @@ export async function getAdminExport(req: Request) {
 
     if (error) throw error;
     if (!attendees || attendees.length === 0) {
-      return new Response("No data found", { status: 404 });
+      return new NextResponse("No data found", { status: 404 });
     }
 
     if (format === "sql") {
@@ -714,7 +720,7 @@ export async function getAdminExport(req: Request) {
         sqlString += `${escapeSQL(row.id)}, ${escapeSQL(row.attendee_id)}, ${escapeSQL(row.full_name)}, ${escapeSQL(row.mobile)}, ${escapeSQL(row.email)}, ${escapeSQL(row.gender)}, ${escapeSQL(row.attendee_type)}, ${escapeSQL(row.business_name)}, ${escapeSQL(row.business_category)}, ${escapeSQL(row.other_category)}, ${escapeSQL(row.address)}, ${escapeSQL(row.city)}, ${escapeSQL(row.state)}, ${escapeSQL(row.pincode)}, ${escapeSQL(days)}, ${escapeSQL(row.photo_url)}, ${escapeSQL(historyStr)}, ${row.needs_cloud_sync ? 1 : 0}, ${row.needs_sheet_sync ? 1 : 0}, ${escapeSQL(row.created_at)});\n`;
       });
 
-      return new Response(sqlString, {
+      return new NextResponse(sqlString, {
         headers: {
           "Content-Type": "application/sql",
           "Content-Disposition": `attachment; filename="tdeup_export.sql"`,
@@ -739,7 +745,7 @@ export async function getAdminExport(req: Request) {
       csvString += values.join(",") + "\n";
     });
 
-    return new Response(csvString, {
+    return new NextResponse(csvString, {
       headers: {
         "Content-Type": "text/csv",
         "Content-Disposition": `attachment; filename="tdeup_export.csv"`,
@@ -747,6 +753,6 @@ export async function getAdminExport(req: Request) {
     });
   } catch (error) {
     console.error("Export Error:", error);
-    return new Response("Failed to generate export", { status: 500 });
+    return new NextResponse("Failed to generate export", { status: 500 });
   }
 }
