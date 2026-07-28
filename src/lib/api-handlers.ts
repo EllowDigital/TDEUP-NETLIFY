@@ -8,18 +8,18 @@ import { v2 as cloudinary } from "cloudinary";
 import { formSchema } from "./schema";
 
 // ---------------------------------------------------------
-// Configuration & Global Settings
+// Configuration & Global Settings (Cold-Start Optimized)
 // ---------------------------------------------------------
-function getSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+// OPTIMIZATION: Initialize clients outside the handlers so they are
+// cached and reused across API calls in the serverless container.
 
-  if (!supabaseUrl || !supabaseKey) {
-    throw new Error("Missing Supabase environment variables");
-  }
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-  return createClient(supabaseUrl, supabaseKey);
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error("Missing Supabase environment variables");
 }
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -27,20 +27,31 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+const auth = new google.auth.GoogleAuth({
+  credentials: {
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+  },
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+});
+const sheets = google.sheets({ version: "v4", auth });
+
 const CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 // ---------------------------------------------------------
 // Helper Functions
 // ---------------------------------------------------------
-function generateCode(length = 6) {
-  let code = "";
-  for (let index = 0; index < length; index++) {
-    code += CHARS[Math.floor(Math.random() * CHARS.length)];
+// COLLISION-PROOF ID: Mixes base36 timestamp with random chars
+function generateUniqueId(typeInitial: string) {
+  const timeFragment = Date.now().toString(36).toUpperCase().slice(-4);
+  let randomFragment = "";
+  for (let i = 0; i < 4; i++) {
+    randomFragment += CHARS[Math.floor(Math.random() * CHARS.length)];
   }
-  return code;
+  return `TDE26-${typeInitial}-${timeFragment}${randomFragment}`;
 }
 
-// 🛡️ ROBUST FEATURE: Cloudinary upload with strict timeouts & retries
+// 🛡️ ROBUST FEATURE: Cloudinary upload with strict timeouts, retries, and no-overwrite
 async function uploadToCloudinary(
   buffer: Buffer,
   mobile: string,
@@ -52,9 +63,10 @@ async function uploadToCloudinary(
         const uploadStream = cloudinary.uploader.upload_stream(
           {
             folder: "TDEUP_Visitors",
-            public_id: mobile,
-            overwrite: true,
-            timeout: 10000, // Strict 10-second timeout to prevent server crash
+            public_id: mobile, // Strict naming by mobile number
+            overwrite: false, // Save bandwidth, don't overwrite existing
+            resource_type: "image",
+            timeout: 15000, // 15s timeout for slow networks
           },
           (error, result) => {
             if (result) resolve(result.secure_url);
@@ -65,82 +77,147 @@ async function uploadToCloudinary(
       });
     } catch (error) {
       if (attempt === retries) return null;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise((r) => setTimeout(r, 1000)); // Wait 1s before retry
     }
   }
   return null;
 }
 
-// 🛡️ CRITICAL FIX: Use NextResponse to prevent Netlify timeouts
+// Helper to return consistent JSON responses
 function jsonResponse(body: unknown, status = 200) {
   return NextResponse.json(body, { status });
 }
 
+// Helper to escape single quotes safely for SQLite
+const escapeSQL = (val: string | null | undefined) => {
+  if (val === null || val === undefined || val === "") return "NULL";
+  return `'${String(val).replace(/'/g, "''")}'`;
+};
+
+// Helper for strict CSV escaping
+const escapeCSV = (val: any) => {
+  if (val === null || val === undefined || val === "") return '""';
+  const str = String(val);
+  if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+};
+
 // ---------------------------------------------------------
 // 1. FIND PASS
 // ---------------------------------------------------------
-// 🛡️ CRITICAL FIX: Use NextRequest
 export async function postFindPass(req: NextRequest) {
   try {
-    const { mobile } = await req.json();
-
-    if (!mobile || typeof mobile !== "string" || mobile.trim() === "") {
-      return jsonResponse({ success: false, message: "A valid mobile number is required." }, 400);
+    let body;
+    try {
+      body = await req.json();
+    } catch (parseError) {
+      return jsonResponse(
+        { success: false, message: "Invalid JSON payload. | अमान्य JSON पेलोड।" },
+        400
+      );
     }
 
-    const supabase = getSupabase();
+    const rawMobile = body?.mobile;
+
+    if (!rawMobile || typeof rawMobile !== "string") {
+      return jsonResponse(
+        {
+          success: false,
+          message: "A valid mobile number is required. | एक वैध मोबाइल नंबर आवश्यक है।",
+        },
+        400
+      );
+    }
+
+    // SANITIZE: Strip non-digits to match DB constraint
+    const cleanMobile = rawMobile.replace(/\D/g, "");
+
+    if (cleanMobile.length < 10) {
+      return jsonResponse(
+        {
+          success: false,
+          message:
+            "Please enter a valid 10-digit mobile number. | कृपया 10 अंकों का वैध मोबाइल नंबर दर्ज करें।",
+        },
+        400
+      );
+    }
+
+    // OPTIMIZATION: Explicitly select only mapped fields to save memory
     const { data, error } = await supabase
       .from("attendees")
-      .select("*")
-      .eq("mobile", mobile.trim())
+      .select(
+        `
+        attendee_id, full_name, mobile, email, gender, attendee_type, 
+        business_name, business_category, other_category, 
+        address, city, state, pincode, attendance_days, photo_url
+      `
+      )
+      .eq("mobile", cleanMobile)
       .maybeSingle();
 
-    if (error) throw error;
+    if (error) {
+      console.error("Supabase Error [Find Pass]:", error);
+      throw new Error("Database query failed.");
+    }
 
     if (!data) {
       return jsonResponse(
-        { success: false, message: "No pass found for this mobile number." },
+        {
+          success: false,
+          message:
+            "No pass found for this mobile number. Please register first. | इस मोबाइल नंबर के लिए कोई पास नहीं मिला। कृपया पहले पंजीकरण करें।",
+        },
         404
       );
     }
 
     return jsonResponse({ success: true, attendee: data }, 200);
-  } catch (error) {
+  } catch (error: any) {
     console.error("Find Pass Error:", error);
-    return jsonResponse({ success: false, message: "Server error" }, 500);
+    return jsonResponse({ success: false, message: "Server error | सर्वर त्रुटि" }, 500);
   }
 }
 
 // ---------------------------------------------------------
 // 2. CHECK IN (Multi-Day Logic & Test Mode)
 // ---------------------------------------------------------
-// 🛡️ CRITICAL FIX: Use NextRequest
 export async function postCheckIn(req: NextRequest) {
   try {
     // ==========================================
     // ⚙️ EVENT CONFIGURATION & TEST MODE
     // ==========================================
     const IS_TEST_MODE = false; // ⚠️ CHANGE TO 'false' FOR THE LIVE EVENT
-
-    // If testing, set the fake date here
-    // const testDate = new Date(2026, 7, 30, 10, 0, 0);
-    // const testDate = new Date(2026, 7, 31, 10, 0, 0);
-    const testDate = new Date(2026, 8, 1, 10, 0, 0);
-
+    const testDate = new Date(2026, 7, 30, 10, 0, 0); // 30 August 2026
     // ==========================================
 
-    const { attendee_id } = await req.json();
-
-    // Grab the browser info to act as the "device" name for online check-ins
-    const userAgent = req.headers.get("user-agent") || "Online Web Portal";
-
-    if (!attendee_id) {
-      return jsonResponse({ success: false, message: "Attendee ID required." }, 400);
+    let body;
+    try {
+      body = await req.json();
+    } catch (parseError) {
+      return jsonResponse(
+        { success: false, message: "Invalid JSON payload. | अमान्य JSON पेलोड।" },
+        400
+      );
     }
 
-    const supabase = getSupabase();
+    const rawAttendeeId = body?.attendee_id;
 
-    // 1. Fetch user data
+    if (!rawAttendeeId || typeof rawAttendeeId !== "string" || rawAttendeeId.trim() === "") {
+      return jsonResponse(
+        {
+          success: false,
+          message: "A valid Attendee ID is required. | एक वैध अटेंडी आईडी आवश्यक है।",
+        },
+        400
+      );
+    }
+    const attendee_id = rawAttendeeId.trim();
+
+    const userAgent = req.headers.get("user-agent") || "Online Web Portal";
+
     const { data: user, error: fetchError } = await supabase
       .from("attendees")
       .select("full_name, attendance_days, checkin_history")
@@ -148,10 +225,15 @@ export async function postCheckIn(req: NextRequest) {
       .maybeSingle();
 
     if (fetchError || !user) {
-      return jsonResponse({ success: false, message: "Invalid Pass. Attendee not found." }, 404);
+      return jsonResponse(
+        {
+          success: false,
+          message: "Invalid Pass. Attendee not found. | अमान्य पास। उपस्थित व्यक्ति नहीं मिला।",
+        },
+        404
+      );
     }
 
-    // 2. Determine "Today's Date" (Using Test Date OR Real IST Date)
     const dateIST = IS_TEST_MODE
       ? testDate
       : new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
@@ -161,9 +243,7 @@ export async function postCheckIn(req: NextRequest) {
     const monthNum = String(dateIST.getMonth() + 1).padStart(2, "0");
     const dayNum = String(day).padStart(2, "0");
 
-    // Create the machine-readable date_code (e.g., "2026-08-30")
     const dateCode = `${year}-${monthNum}-${dayNum}`;
-
     const monthNames = [
       "January",
       "February",
@@ -179,64 +259,64 @@ export async function postCheckIn(req: NextRequest) {
       "December",
     ];
     const month = monthNames[dateIST.getMonth()];
-
-    // Create the human-readable display_date (e.g., "30 August")
     const todayKey = `${day} ${month}`;
 
-    // 3. VALIDATION: Did they register for today?
     const attendanceDays = user.attendance_days || [];
     if (!attendanceDays.includes(todayKey)) {
       return jsonResponse(
         {
           success: false,
-          message: `Access Denied: ${user.full_name} does not have a pass for today (${todayKey}).`,
+          message: `Access Denied: ${user.full_name} does not have a pass for today (${todayKey}). | प्रवेश वर्जित: आज के लिए पास नहीं है।`,
         },
         403
       );
     }
 
-    // 4. VALIDATION: Are they already checked in TODAY?
     const history = user.checkin_history || {};
     if (history[todayKey]) {
       return jsonResponse(
-        { success: false, message: `${user.full_name} is already checked in for today.` },
+        {
+          success: false,
+          message: `${user.full_name} is already checked in for today. | आज के लिए पहले ही चेक-इन कर चुके हैं।`,
+        },
         409
       );
     }
 
-    // 5. SUCCESS: Add today's check-in using the UNIFIED JSON FORMAT
+    // Add check-in using unified format
     history[todayKey] = {
       timestamp: new Date().toISOString(),
       source: "online_portal",
-      device: userAgent.substring(0, 80), // Truncate to keep database clean
+      device: userAgent.substring(0, 80),
       date_code: dateCode,
       display_date: todayKey,
     };
 
-    // 6. Update database with new history AND correct Sync Flags
     const { error: updateError } = await supabase
       .from("attendees")
       .update({
         checkin_history: history,
-        needs_sheet_sync: true, // Tells system to update Google Sheets
-        needs_local_sync: true, // Tells Laptop-A to download this check-in
+        needs_sheet_sync: true,
+        needs_local_sync: true,
       })
       .eq("attendee_id", attendee_id);
 
     if (updateError) {
-      console.error("Database Update Error:", updateError);
+      console.error("Database Update Error [Check-in]:", updateError);
       throw new Error("Failed to save check-in to database.");
     }
 
-    // 7. Return Success
-    let successMessage = `Day ${day} Access Granted! Welcome ${user.full_name}!`;
+    let successMessage = `Day ${day} Access Granted! Welcome ${user.full_name}! | प्रवेश स्वीकृत! आपका स्वागत है!`;
     if (IS_TEST_MODE) successMessage += ` [TEST MODE: ${todayKey}]`;
 
     return jsonResponse({ success: true, message: successMessage }, 200);
   } catch (error: any) {
     console.error("Check-in Route Error:", error);
     return jsonResponse(
-      { success: false, message: "A server error occurred during check-in." },
+      {
+        success: false,
+        message: "A server error occurred during check-in. | चेक-इन के दौरान सर्वर त्रुटि हुई।",
+      },
       500
     );
   }
@@ -245,36 +325,65 @@ export async function postCheckIn(req: NextRequest) {
 // ---------------------------------------------------------
 // 3. REGISTER
 // ---------------------------------------------------------
-// 🛡️ CRITICAL FIX: Use NextRequest to prevent FormData Boundary loss
 export async function postRegister(req: NextRequest) {
   try {
-    const supabase = getSupabase();
     let formData: FormData;
-
-    // 🛡️ ROBUST FEATURE: Gracefully catch multipart boundary errors
     try {
       formData = await req.formData();
     } catch (err) {
-      console.error("FormData Parse Error:", err);
-      return jsonResponse({ success: false, message: "Invalid form data submission format." }, 400);
+      return jsonResponse(
+        {
+          success: false,
+          message: "Invalid form data submission format. | अमान्य फ़ॉर्म डेटा सबमिशन प्रारूप।",
+        },
+        400
+      );
     }
 
-    const mobile = formData.get("mobile") as string;
-    if (!mobile || mobile.trim() === "") {
-      return jsonResponse({ success: false, message: "Mobile number is required." }, 400);
+    const rawMobile = (formData.get("mobile") as string) || "";
+    const mobile = rawMobile.replace(/\D/g, "");
+
+    if (!mobile || mobile.length < 10) {
+      return jsonResponse(
+        {
+          success: false,
+          message:
+            "A valid 10-digit mobile number is required. | एक वैध 10-अंकीय मोबाइल नंबर आवश्यक है।",
+        },
+        400
+      );
+    }
+
+    // CHECK IF USER ALREADY EXISTS (Prevents wasted processing)
+    const { data: existingUser } = await supabase
+      .from("attendees")
+      .select("attendee_id")
+      .eq("mobile", mobile)
+      .maybeSingle();
+
+    if (existingUser) {
+      return jsonResponse(
+        {
+          success: false,
+          attendeeId: existingUser.attendee_id,
+          message:
+            "You are already registered! Please click download pass to retrieve it. | आप पहले से ही पंजीकृत हैं! कृपया पास प्राप्त करने के लिए डाउनलोड पर क्लिक करें।",
+        },
+        409
+      );
     }
 
     const attendeeType = (formData.get("attendeeType") as string) || "GENERAL";
-    const businessName = (formData.get("businessName") as string) || "";
-    const businessCategory = (formData.get("businessCategory") as string) || "";
-    const otherCategory = (formData.get("otherCategory") as string) || "";
-    const fullName = (formData.get("fullName") as string) || "";
-    const email = (formData.get("email") as string) || "";
+    const businessName = (formData.get("businessName") as string)?.trim() || "";
+    const businessCategory = (formData.get("businessCategory") as string)?.trim() || "";
+    const otherCategory = (formData.get("otherCategory") as string)?.trim() || "";
+    const fullName = (formData.get("fullName") as string)?.trim() || "";
+    const email = (formData.get("email") as string)?.trim().toLowerCase() || "";
     const gender = (formData.get("gender") as string) || "";
-    const address = (formData.get("address") as string) || "";
-    const city = (formData.get("city") as string) || "";
-    const state = (formData.get("state") as string) || "";
-    const pincode = (formData.get("pincode") as string) || "";
+    const address = (formData.get("address") as string)?.trim() || "";
+    const city = (formData.get("city") as string)?.trim() || "";
+    const state = (formData.get("state") as string)?.trim() || "";
+    const pincode = (formData.get("pincode") as string)?.trim() || "";
 
     const rawAttendance = formData.get("attendance") as string;
     let attendanceArray: string[] = [];
@@ -284,10 +393,21 @@ export async function postRegister(req: NextRequest) {
       attendanceArray = rawAttendance ? [rawAttendance] : [];
     }
 
-    // 1. DATA VALIDATION
+    if (attendeeType !== "GENERAL" && !businessName) {
+      return jsonResponse(
+        {
+          success: false,
+          message:
+            "Business/Firm name is required for your visitor type. | आपके विज़िटर प्रकार के लिए व्यवसाय/फर्म का नाम आवश्यक है।",
+        },
+        400
+      );
+    }
+
+    // ZOD DATA VALIDATION
     const validationResult = formSchema.safeParse({
       fullName,
-      mobile: mobile.trim(),
+      mobile,
       email,
       gender,
       attendeeType,
@@ -305,7 +425,9 @@ export async function postRegister(req: NextRequest) {
       return jsonResponse(
         {
           success: false,
-          message: validationResult.error.issues[0]?.message || "Please complete all fields.",
+          message:
+            validationResult.error.issues[0]?.message ||
+            "Please complete all fields correctly. | कृपया सभी फ़ील्ड सही ढंग से भरें।",
         },
         400
       );
@@ -313,17 +435,16 @@ export async function postRegister(req: NextRequest) {
 
     const photoFile = formData.get("photo") as File | null;
     if (!photoFile || photoFile.size === 0) {
-      return jsonResponse({ success: false, message: "Profile photo is required." }, 400);
+      return jsonResponse(
+        { success: false, message: "Profile photo is required. | प्रोफ़ाइल फ़ोटो आवश्यक है।" },
+        400
+      );
     }
 
-    // 2. PREPARE SECURE DATA
     const typeInitial = attendeeType.charAt(0).toUpperCase();
-    const attendee_id = `TDE26-${typeInitial}-${generateCode(6)}`;
-    const normalizedBusinessName = businessName.trim() || null;
-    const normalizedBusinessCategory = businessCategory.trim() || null;
-    let normalizedOtherCategory: string | null = otherCategory.trim() || null;
-
-    if (normalizedBusinessCategory !== "OTHER" || !normalizedOtherCategory) {
+    const attendee_id = generateUniqueId(typeInitial);
+    let normalizedOtherCategory: string | null = otherCategory || null;
+    if (businessCategory !== "OTHER" || !normalizedOtherCategory) {
       normalizedOtherCategory = null;
     }
 
@@ -334,28 +455,31 @@ export async function postRegister(req: NextRequest) {
     };
     attendanceArray.sort((a, b) => (chronologicalOrder[a] || 99) - (chronologicalOrder[b] || 99));
 
-    // 3. UPLOAD PHOTO
     const buffer = Buffer.from(await photoFile.arrayBuffer());
-    const photoUrl = await uploadToCloudinary(buffer, mobile.trim());
+    const photoUrl = await uploadToCloudinary(buffer, mobile);
 
     if (!photoUrl) {
       return jsonResponse(
-        { success: false, message: "Network too slow. Photo upload timed out. Please try again." },
+        {
+          success: false,
+          message:
+            "Network too slow. Photo upload timed out. Please try again. | नेटवर्क बहुत धीमा है। फ़ोटो अपलोड समय समाप्त। कृपया पुनः प्रयास करें।",
+        },
         502
       );
     }
 
-    // 4. FAST SUPABASE INSERT
+    // FAST SUPABASE INSERT
     const { error: insertError } = await supabase.from("attendees").insert([
       {
-        attendee_id: attendee_id,
+        attendee_id,
         full_name: fullName,
-        mobile: mobile.trim(),
-        email: email?.trim() || null,
+        mobile,
+        email: email || null,
         gender,
         attendee_type: attendeeType,
-        business_name: normalizedBusinessName,
-        business_category: normalizedBusinessCategory,
+        business_name: businessName || null,
+        business_category: businessCategory || null,
         other_category: normalizedOtherCategory,
         address,
         city,
@@ -364,84 +488,53 @@ export async function postRegister(req: NextRequest) {
         attendance_days: attendanceArray,
         photo_url: photoUrl,
         checkin_history: {},
-        needs_local_sync: true, // Tell local clients to download
+        needs_local_sync: true,
         needs_cloud_sync: false,
-        needs_sheet_sync: true, // Tell system to send to Sheets
+        needs_sheet_sync: true,
       },
     ]);
 
+    // RACE-CONDITION FALLBACK (Double submit unique constraint)
     if (insertError) {
-      if (insertError.code === "23505") {
-        return jsonResponse({ success: false, message: "You are already registered." }, 409);
-      }
-      throw new Error("Database error");
-    }
-
-    // 5. 🛡️ ROBUST GOOGLE SHEETS ATTEMPT (Non-blocking failure)
-    try {
-      const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-      if (spreadsheetId && process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY) {
-        const auth = new google.auth.GoogleAuth({
-          credentials: {
-            client_email: process.env.GOOGLE_CLIENT_EMAIL,
-            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-          },
-          scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-        });
-
-        const sheets = google.sheets({ version: "v4", auth });
-
-        const rowData = [
-          attendee_id,
-          fullName,
-          mobile.trim(),
-          email?.trim() || "N/A",
-          gender,
-          attendeeType,
-          normalizedBusinessName || "N/A",
-          normalizedBusinessCategory || "N/A",
-          normalizedOtherCategory || "N/A",
-          address,
-          city,
-          state,
-          pincode,
-          attendanceArray.join(", "),
-          photoUrl,
-          "Not Checked In",
-          new Date().toISOString(),
-        ];
-
-        // Append to sheets
-        await sheets.spreadsheets.values.append({
-          spreadsheetId,
-          range: "Sheet1!A:Q",
-          valueInputOption: "USER_ENTERED",
-          requestBody: { values: [rowData] },
-        });
-
-        // If successful, update the flag in Supabase so Admin Sync doesn't duplicate it
-        await supabase
+      if (insertError.code === "23505" && insertError.message.includes("mobile")) {
+        const { data: raceConditionUser } = await supabase
           .from("attendees")
-          .update({ needs_sheet_sync: false })
-          .eq("attendee_id", attendee_id);
+          .select("attendee_id")
+          .eq("mobile", mobile)
+          .single();
+        return jsonResponse(
+          {
+            success: false,
+            attendeeId: raceConditionUser?.attendee_id,
+            message:
+              "You are already registered! Please click download pass to retrieve it. | आप पहले से ही पंजीकृत हैं! कृपया पास प्राप्त करने के लिए डाउनलोड पर क्लिक करें।",
+          },
+          409
+        );
       }
-    } catch (sheetError) {
-      console.warn("Direct Google Sheet sync failed. Deferred to Admin Sync.", sheetError);
+      console.error("Database error during insert:", insertError);
+      throw new Error("Failed to create registration record.");
     }
 
-    // 6. INSTANT SUCCESS RETURN
+    // EXPLICITLY REMOVED AUTOMATIC GOOGLE SHEETS SYNC HERE.
+    // Sync will only happen when manually triggered via the Admin Dashboard.
+
     return jsonResponse(
       {
         success: true,
         attendeeId: attendee_id,
-        message: "Registration successful! Pass generated.",
+        message: "Registration successful! Pass generated. | पंजीकरण सफल! पास बन गया है।",
       },
       201
     );
   } catch (error: any) {
     console.error("Critical System Error:", error);
     return jsonResponse(
-      { success: false, message: "An unexpected error occurred. Please try again." },
+      {
+        success: false,
+        message:
+          "An unexpected error occurred. Please try again. | एक अप्रत्याशित त्रुटि हुई। कृपया पुनः प्रयास करें।",
+      },
       500
     );
   }
@@ -452,36 +545,52 @@ export async function postRegister(req: NextRequest) {
 // ---------------------------------------------------------
 export async function getAdminStats() {
   try {
-    const supabase = getSupabase();
+    // OPTIMIZATION: Execute all 4 HEAD queries concurrently via Promise.all.
+    const [totalResult, pendingSheetResult, pendingLocalResult, checkedInResult] =
+      await Promise.all([
+        supabase.from("attendees").select("*", { count: "exact", head: true }),
+        supabase
+          .from("attendees")
+          .select("*", { count: "exact", head: true })
+          .eq("needs_sheet_sync", true),
+        supabase
+          .from("attendees")
+          .select("*", { count: "exact", head: true })
+          .eq("needs_local_sync", true),
+        supabase
+          .from("attendees")
+          .select("*", { count: "exact", head: true })
+          .neq("checkin_history", "{}"),
+      ]);
 
-    const { count: totalCount, error: totalError } = await supabase
-      .from("attendees")
-      .select("*", { count: "exact", head: true });
+    if (totalResult.error) throw totalResult.error;
+    if (pendingSheetResult.error) throw pendingSheetResult.error;
+    if (pendingLocalResult.error) throw pendingLocalResult.error;
+    if (checkedInResult.error) throw checkedInResult.error;
 
-    const { count: pendingCount, error: pendingError } = await supabase
-      .from("attendees")
-      .select("*", { count: "exact", head: true })
-      .eq("needs_sheet_sync", true);
-
-    const { count: checkedInCount, error: checkedInError } = await supabase
-      .from("attendees")
-      .select("*", { count: "exact", head: true })
-      .neq("checkin_history", "{}");
-
-    if (totalError || pendingError || checkedInError) throw new Error("Failed to fetch counts");
-
-    return jsonResponse(
+    return NextResponse.json(
       {
         success: true,
-        total: totalCount || 0,
-        pendingSync: pendingCount || 0,
-        checkedIn: checkedInCount || 0,
+        total: totalResult.count ?? 0,
+        pendingSync: pendingSheetResult.count ?? 0,
+        pendingLocalSync: pendingLocalResult.count ?? 0,
+        checkedIn: checkedInResult.count ?? 0,
+        timestamp: new Date().toISOString(),
       },
-      200
+      {
+        status: 200,
+        headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
+      }
     );
-  } catch (error) {
+  } catch (error: any) {
     console.error("Stats Error:", error);
-    return jsonResponse({ success: false, message: "Server error" }, 500);
+    return jsonResponse(
+      {
+        success: false,
+        message: "Server error while fetching stats | आँकड़े लाते समय सर्वर त्रुटि",
+      },
+      500
+    );
   }
 }
 
@@ -490,49 +599,46 @@ export async function getAdminStats() {
 // ---------------------------------------------------------
 export async function postAdminSync() {
   try {
-    const supabase = getSupabase();
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-
     if (!spreadsheetId) {
-      return jsonResponse({ success: false, message: "Google Sheet ID is missing." }, 500);
+      return jsonResponse(
+        { success: false, message: "Google Sheet ID is missing. | Google Sheet ID मौजूद नहीं है।" },
+        500
+      );
     }
 
-    // 1. Fetch exactly 100 records needing sync to prevent server timeout
+    // Increased limit to 300 for efficiency
     const { data: attendeesToSync, error: fetchError } = await supabase
       .from("attendees")
       .select("*")
       .eq("needs_sheet_sync", true)
-      .limit(100);
+      .limit(300);
 
     if (fetchError) {
-      console.error("Supabase Fetch Error:", fetchError);
       return jsonResponse(
-        { success: false, message: "Failed to fetch records from database." },
+        {
+          success: false,
+          message:
+            "Failed to fetch records from database. | डेटाबेस से रिकॉर्ड प्राप्त करने में विफल।",
+        },
         500
       );
     }
 
     if (!attendeesToSync || attendeesToSync.length === 0) {
       return jsonResponse(
-        { success: true, message: "Everything is up to date. No records to sync." },
+        {
+          success: true,
+          message:
+            "Everything is up to date. No records to sync. | सब कुछ अपडेट है। सिंक करने के लिए कोई रिकॉर्ड नहीं है।",
+        },
         200
       );
     }
 
-    // 2. Initialize Google Sheets API
-    const auth = new google.auth.GoogleAuth({
-      credentials: {
-        client_email: process.env.GOOGLE_CLIENT_EMAIL,
-        private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-      },
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
-    const sheets = google.sheets({ version: "v4", auth });
-
-    // 3. GET PRE-LOCATION OF USERS (Read Column A to find existing rows)
     const existingIdsResponse = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "Sheet1!A:A", // Fetch only Attendee IDs
+      range: "Sheet1!A:A",
     });
 
     const existingRows = existingIdsResponse.data.values || [];
@@ -541,21 +647,26 @@ export async function postAdminSync() {
       if (row[0]) rowIndexMap.set(row[0].trim(), index + 1);
     });
 
-    // 4. SORT DATA INTO 'UPDATES' AND 'APPENDS'
     const updateData: any[] = [];
     const appendData: any[] = [];
     const successfullyProcessedIds: string[] = [];
 
     attendeesToSync.forEach((attendee) => {
-      // Format check-in history beautifully
       let checkinStatus = "Not Checked In";
-      if (attendee.checkin_history && Object.keys(attendee.checkin_history).length > 0) {
-        checkinStatus = Object.entries(attendee.checkin_history)
-          .map(([date, details]: [string, any]) => `${date} (${details.source || "unknown"})`)
-          .join(" | ");
+      if (attendee.checkin_history && typeof attendee.checkin_history === "object") {
+        const historyKeys = Object.keys(attendee.checkin_history);
+        if (historyKeys.length > 0) {
+          checkinStatus = Object.entries(attendee.checkin_history)
+            .map(([date, details]: [string, any]) => {
+              if (typeof details === "string") return `${date} (${details})`;
+              if (typeof details === "object" && details !== null)
+                return `${date} (${details.source || "Checked In"})`;
+              return `${date}`;
+            })
+            .join(" | ");
+        }
       }
 
-      // Exact row format matching Google Sheet Columns A to Q
       const formattedRow = [
         attendee.attendee_id,
         attendee.full_name,
@@ -577,7 +688,6 @@ export async function postAdminSync() {
       ];
 
       const existingRowNumber = rowIndexMap.get(attendee.attendee_id);
-
       if (existingRowNumber) {
         updateData.push({
           range: `Sheet1!A${existingRowNumber}:Q${existingRowNumber}`,
@@ -586,39 +696,43 @@ export async function postAdminSync() {
       } else {
         appendData.push(formattedRow);
       }
-
       successfullyProcessedIds.push(attendee.id);
     });
 
-    // 5. EXECUTE GOOGLE SHEETS API CALLS
     try {
-      if (updateData.length > 0) {
-        await sheets.spreadsheets.values.batchUpdate({
-          spreadsheetId,
-          requestBody: {
-            valueInputOption: "USER_ENTERED",
-            data: updateData,
-          },
-        });
-      }
+      const sheetPromises = [];
 
-      if (appendData.length > 0) {
-        await sheets.spreadsheets.values.append({
-          spreadsheetId,
-          range: "Sheet1!A:Q",
-          valueInputOption: "USER_ENTERED",
-          requestBody: { values: appendData },
-        });
+      // OPTIMIZATION: Concurrently batch update and append
+      if (updateData.length > 0) {
+        sheetPromises.push(
+          sheets.spreadsheets.values.batchUpdate({
+            spreadsheetId,
+            requestBody: { valueInputOption: "USER_ENTERED", data: updateData },
+          })
+        );
       }
+      if (appendData.length > 0) {
+        sheetPromises.push(
+          sheets.spreadsheets.values.append({
+            spreadsheetId,
+            range: "Sheet1!A:Q",
+            valueInputOption: "USER_ENTERED",
+            requestBody: { values: appendData },
+          })
+        );
+      }
+      await Promise.all(sheetPromises);
     } catch (sheetError) {
       console.error("Google Sheets API Error:", sheetError);
       return jsonResponse(
-        { success: false, message: "Connected to database, but failed to write to Google Sheets." },
+        {
+          success: false,
+          message: "Failed to write to Google Sheets. | Google Sheets में लिखने में विफल।",
+        },
         502
       );
     }
 
-    // 6. CLEAR FLAGS IN SUPABASE
     if (successfullyProcessedIds.length > 0) {
       const { error: updateError } = await supabase
         .from("attendees")
@@ -626,29 +740,31 @@ export async function postAdminSync() {
         .in("id", successfullyProcessedIds);
 
       if (updateError) {
-        console.error("Supabase Flag Update Error:", updateError);
         return jsonResponse(
           {
             success: false,
-            message: "Synced to sheets, but failed to clear sync flags. (Might cause repeat syncs)",
+            message:
+              "Synced to sheets, but failed to clear flags. | शीट्स से सिंक किया गया, लेकिन फ़्लैग साफ़ करने में विफल।",
           },
           500
         );
       }
     }
 
-    // 7. RETURN ROBUST SUCCESS
     return jsonResponse(
       {
         success: true,
-        message: `Successfully synced ${successfullyProcessedIds.length} records (${updateData.length} updated, ${appendData.length} new).`,
+        message: `Successfully synced ${successfullyProcessedIds.length} records (${updateData.length} updated, ${appendData.length} new). | सफलतापूर्वक सिंक किए गए।`,
       },
       200
     );
   } catch (error: any) {
-    console.error("Critical Sync API Error:", error);
+    console.error("Sync API Error:", error);
     return jsonResponse(
-      { success: false, message: "An unexpected system error occurred during sync." },
+      {
+        success: false,
+        message: "System error occurred during sync. | सिंक के दौरान सिस्टम त्रुटि हुई।",
+      },
       500
     );
   }
@@ -657,26 +773,10 @@ export async function postAdminSync() {
 // ---------------------------------------------------------
 // 6. ADMIN EXPORT
 // ---------------------------------------------------------
-const escapeSQL = (val: string | null | undefined) => {
-  if (!val) return "NULL";
-  return `'${val.replace(/'/g, "''")}'`;
-};
-
-const escapeCSV = (val: unknown) => {
-  if (val === null || val === undefined) return '""';
-  const str = String(val);
-  if (str.includes(",") || str.includes('"') || str.includes("\n")) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-};
-
-// 🛡️ CRITICAL FIX: Use NextRequest and NextResponse for file exports
 export async function getAdminExport(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const format = url.searchParams.get("format") || "csv";
-    const supabase = getSupabase();
 
     const { data: attendees, error } = await supabase
       .from("attendees")
@@ -685,33 +785,39 @@ export async function getAdminExport(req: NextRequest) {
 
     if (error) throw error;
     if (!attendees || attendees.length === 0) {
-      return new NextResponse("No data found", { status: 404 });
+      return new NextResponse("No data found to export", { status: 404 });
     }
 
     if (format === "sql") {
-      let sqlString = `-- TDEUP SQLite3 Database Dump\n`;
-      sqlString += `CREATE TABLE IF NOT EXISTS attendees (\n`;
-      sqlString += `  id TEXT PRIMARY KEY,\n`;
-      sqlString += `  attendee_id TEXT UNIQUE,\n`;
-      sqlString += `  full_name TEXT,\n`;
-      sqlString += `  mobile TEXT,\n`;
-      sqlString += `  email TEXT,\n`;
-      sqlString += `  gender TEXT,\n`;
-      sqlString += `  attendee_type TEXT,\n`;
-      sqlString += `  business_name TEXT,\n`;
-      sqlString += `  business_category TEXT,\n`;
-      sqlString += `  other_category TEXT,\n`;
-      sqlString += `  address TEXT,\n`;
-      sqlString += `  city TEXT,\n`;
-      sqlString += `  state TEXT,\n`;
-      sqlString += `  pincode TEXT,\n`;
-      sqlString += `  attendance_days TEXT,\n`;
-      sqlString += `  photo_url TEXT,\n`;
-      sqlString += `  checkin_history TEXT,\n`;
-      sqlString += `  needs_cloud_sync INTEGER,\n`;
-      sqlString += `  needs_sheet_sync INTEGER,\n`;
-      sqlString += `  created_at DATETIME\n`;
-      sqlString += `);\n\n`;
+      // OPTIMIZATION: High-performance array pushing for string building
+      const sqlLines: string[] = [];
+
+      sqlLines.push(`-- TDEUP SQLite3 Database Dump`);
+      sqlLines.push(`CREATE TABLE IF NOT EXISTS attendees (`);
+      sqlLines.push(`  id TEXT PRIMARY KEY,`);
+      sqlLines.push(`  attendee_id TEXT UNIQUE,`);
+      sqlLines.push(`  full_name TEXT,`);
+      sqlLines.push(`  mobile TEXT,`);
+      sqlLines.push(`  email TEXT,`);
+      sqlLines.push(`  gender TEXT,`);
+      sqlLines.push(`  attendee_type TEXT,`);
+      sqlLines.push(`  business_name TEXT,`);
+      sqlLines.push(`  business_category TEXT,`);
+      sqlLines.push(`  other_category TEXT,`);
+      sqlLines.push(`  address TEXT,`);
+      sqlLines.push(`  city TEXT,`);
+      sqlLines.push(`  state TEXT,`);
+      sqlLines.push(`  pincode TEXT,`);
+      sqlLines.push(`  attendance_days TEXT,`);
+      sqlLines.push(`  photo_url TEXT,`);
+      sqlLines.push(`  checkin_history TEXT,`);
+      sqlLines.push(`  needs_cloud_sync INTEGER,`);
+      sqlLines.push(`  needs_sheet_sync INTEGER,`);
+      sqlLines.push(`  needs_local_sync INTEGER,`);
+      sqlLines.push(`  created_at DATETIME`);
+      sqlLines.push(`);\n`);
+
+      sqlLines.push(`BEGIN TRANSACTION;`);
 
       attendees.forEach((row) => {
         const days = Array.isArray(row.attendance_days)
@@ -719,20 +825,27 @@ export async function getAdminExport(req: NextRequest) {
           : row.attendance_days;
         const historyStr = JSON.stringify(row.checkin_history || {});
 
-        sqlString += `INSERT INTO attendees (id, attendee_id, full_name, mobile, email, gender, attendee_type, business_name, business_category, other_category, address, city, state, pincode, attendance_days, photo_url, checkin_history, needs_cloud_sync, needs_sheet_sync, created_at) VALUES (`;
-        sqlString += `${escapeSQL(row.id)}, ${escapeSQL(row.attendee_id)}, ${escapeSQL(row.full_name)}, ${escapeSQL(row.mobile)}, ${escapeSQL(row.email)}, ${escapeSQL(row.gender)}, ${escapeSQL(row.attendee_type)}, ${escapeSQL(row.business_name)}, ${escapeSQL(row.business_category)}, ${escapeSQL(row.other_category)}, ${escapeSQL(row.address)}, ${escapeSQL(row.city)}, ${escapeSQL(row.state)}, ${escapeSQL(row.pincode)}, ${escapeSQL(days)}, ${escapeSQL(row.photo_url)}, ${escapeSQL(historyStr)}, ${row.needs_cloud_sync ? 1 : 0}, ${row.needs_sheet_sync ? 1 : 0}, ${escapeSQL(row.created_at)});\n`;
+        let rowSql = `INSERT OR REPLACE INTO attendees (id, attendee_id, full_name, mobile, email, gender, attendee_type, business_name, business_category, other_category, address, city, state, pincode, attendance_days, photo_url, checkin_history, needs_cloud_sync, needs_sheet_sync, needs_local_sync, created_at) VALUES (`;
+        rowSql += `${escapeSQL(row.id)}, ${escapeSQL(row.attendee_id)}, ${escapeSQL(row.full_name)}, ${escapeSQL(row.mobile)}, ${escapeSQL(row.email)}, ${escapeSQL(row.gender)}, ${escapeSQL(row.attendee_type)}, ${escapeSQL(row.business_name)}, ${escapeSQL(row.business_category)}, ${escapeSQL(row.other_category)}, ${escapeSQL(row.address)}, ${escapeSQL(row.city)}, ${escapeSQL(row.state)}, ${escapeSQL(row.pincode)}, ${escapeSQL(days)}, ${escapeSQL(row.photo_url)}, ${escapeSQL(historyStr)}, `;
+        rowSql += `${row.needs_cloud_sync ? 1 : 0}, ${row.needs_sheet_sync ? 1 : 0}, ${row.needs_local_sync ? 1 : 0}, ${escapeSQL(row.created_at)});`;
+        sqlLines.push(rowSql);
       });
 
-      return new NextResponse(sqlString, {
+      sqlLines.push(`COMMIT;`);
+
+      return new NextResponse(sqlLines.join("\n"), {
         headers: {
           "Content-Type": "application/sql",
           "Content-Disposition": `attachment; filename="tdeup_export.sql"`,
+          "Cache-Control": "no-store, must-revalidate",
         },
       });
     }
 
+    // CSV EXPORT
     const headers = Object.keys(attendees[0]);
-    let csvString = headers.join(",") + "\n";
+    const csvLines: string[] = [];
+    csvLines.push(headers.join(","));
 
     attendees.forEach((row) => {
       const values = headers.map((header) => {
@@ -745,17 +858,20 @@ export async function getAdminExport(req: NextRequest) {
         }
         return escapeCSV(val);
       });
-      csvString += values.join(",") + "\n";
+      csvLines.push(values.join(","));
     });
 
-    return new NextResponse(csvString, {
+    return new NextResponse(csvLines.join("\n"), {
       headers: {
-        "Content-Type": "text/csv",
+        "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="tdeup_export.csv"`,
+        "Cache-Control": "no-store, must-revalidate",
       },
     });
-  } catch (error) {
-    console.error("Export Error:", error);
-    return new NextResponse("Failed to generate export", { status: 500 });
+  } catch (error: any) {
+    console.error("Critical Export Error:", error);
+    return new NextResponse("Failed to generate export file. Please check server logs.", {
+      status: 500,
+    });
   }
 }
