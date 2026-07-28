@@ -1,12 +1,15 @@
 [build]
-command = "npm run build"
-publish = ".next"
+  command = "npm run build"
+  publish = ".next"
 
 [build.environment]
-NEXT_PUBLIC_API_BASE_PATH = "/.netlify/functions"
+  NEXT_PUBLIC_API_BASE_PATH = "/.netlify/functions"
 
 [functions]
-directory = "netlify/functions"
+  directory = "netlify/functions"
+
+[functions."cron-sync"]
+  schedule = "0 21 * * *"
 
 [[plugins]]
-package = "@netlify/plugin-nextjs"
+  package = "@netlify/plugin-nextjs"
