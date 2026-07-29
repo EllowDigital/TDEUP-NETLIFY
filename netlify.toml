@@ -8,8 +8,8 @@
 [functions]
   directory = "netlify/functions"
 
-[functions."cron-sync"]
-  schedule = "0 21 * * *"
+# [functions."cron-sync"]
+#   schedule = "0 21 * * *"
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
