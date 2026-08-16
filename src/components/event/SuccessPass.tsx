@@ -200,32 +200,10 @@ export function SuccessPass({ attendeeData, attendeeId, onReset }: SuccessPassPr
   );
 
   const qrPayload = useMemo(() => {
-    const qrData: Record<string, string> = {
-      attendeeId,
-      fullName: attendeeData.fullName,
-      attendeeType: attendeeData.attendeeType,
-    };
-
-    if (showOrgDetails) {
-      qrData.organization = attendeeData.businessName || "N/A";
-      qrData.category =
-        attendeeData.attendeeType === "MEDIA"
-          ? "Media/Press"
-          : attendeeData.businessCategory === "OTHER"
-            ? attendeeData.otherCategory || "N/A"
-            : attendeeData.businessCategory || "N/A";
-    }
-
-    return JSON.stringify(qrData);
-  }, [
-    attendeeId,
-    attendeeData.fullName,
-    attendeeData.attendeeType,
-    attendeeData.businessName,
-    attendeeData.businessCategory,
-    attendeeData.otherCategory,
-    showOrgDetails,
-  ]);
+    // Highly optimized payload: Only the unique ID is exported.
+    // This dramatically reduces QR density, allowing instant scanning from maximum distance.
+    return attendeeId;
+  }, [attendeeId]);
 
   return (
     <div className="flex flex-col items-center justify-center h-full space-y-5 animate-in fade-in zoom-in duration-500 overflow-x-auto px-4 w-full py-6">
