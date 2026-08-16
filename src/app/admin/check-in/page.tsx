@@ -19,7 +19,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-// The shape of the data we expect from the SuccessPass QR code or DB
+// The shape of the data we expect from legacy QR codes or DB lookups
 interface ParsedQRData {
   attendeeId: string;
   fullName?: string;
@@ -36,10 +36,10 @@ export default function CheckInPage() {
   const [isSearching, setIsSearching] = useState(false);
   const [isCheckingIn, setIsCheckingIn] = useState(false);
 
-  // NEW: Camera Toggle to save battery
+  // Camera Toggle to save battery
   const [isCameraActive, setIsCameraActive] = useState(true);
 
-  // NEW: Scan Lock to prevent double-scanning the same code in milliseconds
+  // Scan Lock to prevent double-scanning the same code in milliseconds
   const scanLock = useRef(false);
 
   // Status: null (waiting), 'success', or 'error'
@@ -47,9 +47,9 @@ export default function CheckInPage() {
     null
   );
 
-  // Handle successful QR scan (Optimized for instant processing)
+  // Handle successful QR scan (Supports both old JSON passes and new plain-text attendee IDs)
   const handleScan = useCallback((text: string) => {
-    if (scanLock.current) return;
+    if (scanLock.current || !text) return;
     scanLock.current = true; // Lock scanner immediately
 
     // Hardware haptic feedback for instantaneous feel (mobile only)
@@ -61,30 +61,34 @@ export default function CheckInPage() {
       // Ignore if device doesn't support vibration
     }
 
-    try {
-      // Try to parse the JSON embedded in the QR Code
-      const data: ParsedQRData = JSON.parse(text);
-      if (data.attendeeId) {
-        setScannedUser(data);
-        setIsCameraActive(false); // INSTANTLY turn off camera to save battery
-      } else {
-        setApiStatus({ type: "error", message: "Invalid QR format. No Attendee ID found." });
-        // Unlock after 2 seconds so they can try again
-        setTimeout(() => {
-          scanLock.current = false;
-        }, 2000);
+    const rawText = text.trim();
+
+    // 1. Try to parse as legacy JSON format (for existing passes)
+    if (rawText.startsWith("{")) {
+      try {
+        const data: ParsedQRData = JSON.parse(rawText);
+        if (data.attendeeId) {
+          setScannedUser(data);
+          setIsCameraActive(false); // INSTANTLY turn off camera to save battery
+          return;
+        }
+      } catch (e) {
+        // If JSON parsing fails, fall back to plain text handling
       }
-    } catch (e) {
-      // Fallback: If it's just a raw text ID (e.g. TDE26-G-XXXXXX) instead of JSON
-      if (text.startsWith("TDE26-")) {
-        setScannedUser({ attendeeId: text, fullName: "Legacy QR Pass" });
-        setIsCameraActive(false); // INSTANTLY turn off camera
-      } else {
-        setApiStatus({ type: "error", message: "Unrecognized QR Code format." });
-        setTimeout(() => {
-          scanLock.current = false;
-        }, 2000);
-      }
+    }
+
+    // 2. New Ultra-Fast Plain-Text Format (or raw legacy ID string)
+    if (rawText.length > 0) {
+      setScannedUser({
+        attendeeId: rawText.toUpperCase(),
+        fullName: rawText.startsWith("TDE26-") ? "Verified Pass" : "Scanned Attendee",
+      });
+      setIsCameraActive(false); // INSTANTLY turn off camera
+    } else {
+      setApiStatus({ type: "error", message: "Unrecognized or empty QR Code format." });
+      setTimeout(() => {
+        scanLock.current = false;
+      }, 2000);
     }
   }, []);
 
@@ -129,7 +133,7 @@ export default function CheckInPage() {
         setIsSearching(false);
       }
     } else {
-      setScannedUser({ attendeeId: input.toUpperCase() });
+      setScannedUser({ attendeeId: input.toUpperCase(), fullName: "Manual ID Entry" });
     }
   };
 
@@ -340,10 +344,10 @@ export default function CheckInPage() {
                 </div>
                 <div>
                   <p className="text-[10px] uppercase tracking-widest font-extrabold text-blue-500 mb-0.5">
-                    {scannedUser.attendeeType || "Manual ID Entry"}
+                    {scannedUser.attendeeType || "Pass Verified"}
                   </p>
                   <h3 className="text-xl sm:text-2xl font-black text-slate-900 line-clamp-1 leading-tight">
-                    {scannedUser.fullName || "Unverified Name"}
+                    {scannedUser.fullName || "Attendee"}
                   </h3>
                 </div>
               </div>
